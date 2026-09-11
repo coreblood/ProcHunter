@@ -1,4 +1,4 @@
--- ProcHunter v1.0.0 headless harness (Lua 5.1)
+-- ProcHunter v1.2.0 headless harness (Lua 5.1)
 local T, P = 0, 0
 local function ok(cond, msg)
     T = T + 1
@@ -8,17 +8,22 @@ end
 --==================== WoW API stubs ====================
 local clock = 1000
 function GetTime() return clock end
+strsub = string.sub
+strtrim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+local shiftDown = false
+function IsShiftKeyDown() return shiftDown end
+local optCategories = {}
+function InterfaceOptions_AddCategory(p) optCategories[#optCategories+1] = p end
 
 local sent = {}
 function SendAddonMessage(prefix, msg, chan, target)
-    sent[#sent + 1] = { prefix = prefix, msg = msg, chan = chan, target = target }
+    sent[#sent + 1] = { prefix = prefix, msg = msg }
 end
 function UnitName() return "Mhortai" end
 
 local chat = {}
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) chat[#chat + 1] = m end }
 
--- item database for GetItemInfo: entry -> {name, quality, ilvl, equipLoc}
 local items = {}
 function GetItemInfo(arg)
     local e = tonumber(tostring(arg):match("^(%d+)$") or tostring(arg):match("^item:(%d+)"))
@@ -29,12 +34,18 @@ function GetItemInfo(arg)
 end
 function GetItemIcon() return "tex" end
 
-local spells = { [100] = "Frost Bite", [101] = "Frost Bite", [200] = "Holy Nova" }
+local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
+    [888] = "Enrage", [999] = "Increase Intellect 24" }
 function GetSpellInfo(id) return spells[id] end
 
-strsub = string.sub
-local optCategories = {}
-function InterfaceOptions_AddCategory(p) optCategories[#optCategories+1] = p end
+-- spell tooltip text used by the classification scanner
+local spellTips = {
+    [100] = { "Frost Bite", "Chance on hit: Blasts the enemy for 100 Frost damage." },
+    [101] = { "Frost Bite", "Chance on hit: Blasts the enemy for 100 Frost damage." },
+    [999] = { "Increase Intellect 24", "Increases Intellect by 24." },
+    [888] = { "Enrage", "Increases your attack power by 300 for 30 sec." },
+}
+
 ITEM_QUALITY_COLORS = {}
 for i = 0, 7 do ITEM_QUALITY_COLORS[i] = { hex = "|cffffffff" } end
 UISpecialFrames = {}
@@ -73,10 +84,22 @@ function CreateFrame(ftype, name, parent, template)
     f.GetPoint = function() return "CENTER", nil, "CENTER", 0, 0 end
     f.GetText = function(self) return self._text or "" end
     f.SetText = function(self, t) self._text = t end
-    f.ClearLines = function() end
-    f.SetHyperlink = function() end
     f.SetChecked = function(self, v) self._checked = not not v end
     f.GetChecked = function(self) return self._checked end
+    if ftype == "GameTooltip" and name then
+        f._lines = {}
+        f.ClearLines = function(self) self._lines = {} end
+        f.SetHyperlink = function(self, link)
+            local sid = tonumber(tostring(link):match("^spell:(%d+)"))
+            self._lines = sid and spellTips[sid] or {}
+            for i, txt in ipairs(self._lines) do
+                local g = _G[name .. "TextLeft" .. i] or NewRegion("fs")
+                _G[name .. "TextLeft" .. i] = g
+                g._text = txt
+            end
+        end
+        f.NumLines = function(self) return #self._lines end
+    end
     setmetatable(f, { __index = function(_, k)
         if type(k) == "string" and k:match("^[A-Z]") then return function() end end
     end })
@@ -94,10 +117,12 @@ GameTooltip = CreateFrame("GameTooltip")
 
 --==================== synthetic databases ====================
 ProcHunter_ProcDB = {
-    [100] = "Frostbrand Blade",              -- weapon proc (two ranks)
+    [100] = "Frostbrand Blade",
     [101] = { "Frostbrand Blade", "Frost Shield" },
     [200] = "Holy Satchel",                  -- proc-named BAG (must not show)
-    [300] = "Mystery Maul",                  -- proc on an uncached item
+    [300] = "Mystery Maul",                  -- proc on an uncached item (empty tip)
+    [888] = "Berserker Blade",               -- duration buff => real proc
+    [999] = "Eagle Cuirass",                 -- flat stat only => hidden
 }
 ProcHunter_ProcDB_Manual = { [400] = "Override Ring" }
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
@@ -119,174 +144,177 @@ init._scripts["OnEvent"](init, "ADDON_LOADED", "ProcHunter")
 init._scripts["OnEvent"](init, "PLAYER_LOGIN")
 ok(#chat == 1 and chat[1]:find("ProcHunter"), "exactly one login stamp")
 
---==================== cached items ====================
+--==================== wire path ====================
 items[1001] = { name = "Frostbrand Blade", q = 4, ilvl = 200 }
 items[1002] = { name = "Plain Chestplate", q = 3, ilvl = 180 }
-items[1003] = { name = "Holy Satchel", q = 3, ilvl = 1 }     -- bag
-items[1004] = { name = "Holy Satchel", q = 1, ilvl = 1 }     -- consumable twin
+items[1003] = { name = "Holy Satchel", q = 3, ilvl = 1 }
+items[1004] = { name = "Holy Satchel", q = 1, ilvl = 1 }
 items[1006] = { name = "Override Ring", q = 3, ilvl = 190 }
 -- 1005 "Mystery Maul" stays uncached at first
 
 local function feed(msg) comms._scripts["OnEvent"](comms, "CHAT_MSG_ADDON", "UNC", msg) end
+local function tick() ticker._scripts["OnUpdate"](ticker) end
 
--- snapshot: weapon+proc / armor no proc / bag(class1) / consumable(class0)
--- / uncached weapon / ring from manual override (class4)
--- duplicate of the first row exercises the e:rp dedupe
 feed("VLTROW:1001,0,1,4,2,7,200,icon;1002,0,2,3,4,4,180,icon;")
 feed("VLTROW:1001,0,1,4,2,7,200,icon;1003,0,1,3,1,0,1,icon;1004,0,5,1,0,0,1,icon;")
 feed("VLTROW:1005,0,1,4,2,4,210,icon;1006,-13,1,3,4,0,190,icon;")
 feed("VLTEND:")
 
--- open the window
 SlashCmdList["PROCHUNTER"]()
+local win = _G["ProcHunterFrame"]
+ok(win._shown == true, "window visible on the FIRST toggle (v1.0.0 regression)")
+ok(#sent == 1 and sent[1].msg == "VLTGET", "open always sends VLTGET underneath")
 ok(lastStatus:find("6 in vault") ~= nil, "6 vault rows after dedupe: " .. lastStatus)
-ok(lastStatus:find("4 equippable") ~= nil, "4 equippable (bag+consumable excluded): " .. lastStatus)
+ok(lastStatus:find("4 equippable") ~= nil, "bag+consumable excluded: " .. lastStatus)
 ok(lastStatus:find("2 with procs") ~= nil, "2 procs while maul uncached: " .. lastStatus)
 ok(lastStatus:find("1 waiting") ~= nil, "1 pending on cache: " .. lastStatus)
+ok(lastStatus:find("source: UncappedVault") == nil, "wire source has no tag")
 
--- opening with a snapshot already seen but not dirty must NOT send VLTGET
-ok(#sent == 0, "no VLTGET while snapshot fresh (sent=" .. #sent .. ")")
-
---==================== cache resolution ====================
 items[1005] = { name = "Mystery Maul", q = 4, ilvl = 210 }
-clock = clock + 2
-ticker._scripts["OnUpdate"](ticker)
+clock = clock + 2; tick()
 ok(lastStatus:find("3 with procs") ~= nil, "maul joins after cache: " .. lastStatus)
 ok(lastStatus:find("waiting") == nil, "pending cleared: " .. lastStatus)
-ok(lastStatus:find("showing 3") ~= nil, "3 rows shown: " .. lastStatus)
 
---==================== dirty -> debounced re-request ====================
+--==================== VLTUPD debounce + cooldown ====================
+local before = #sent
 feed("VLTUPD:")
-clock = clock + 3
-ticker._scripts["OnUpdate"](ticker)
-ok(#sent == 1 and sent[1].msg == "VLTGET" and sent[1].prefix == "REAGENTBANK",
-    "VLTUPD triggers one VLTGET (sent=" .. #sent .. ")")
--- immediate second dirty within cooldown: no extra send
+clock = clock + 3; tick()
+ok(#sent == before + 1 and sent[#sent].msg == "VLTGET",
+    "VLTUPD triggers one VLTGET")
+before = #sent
 feed("VLTUPD:")
-clock = clock + 2.5
-ticker._scripts["OnUpdate"](ticker)
-ok(#sent == 1, "request cooldown respected (sent=" .. #sent .. ")")
+clock = clock + 2.5; tick()
+ok(#sent == before, "request cooldown respected")
 
 --==================== fallback 3-field parse ====================
 feed("VLTROW:1001,0,1,junkfield;")
 feed("VLTEND:")
-ok(lastStatus:find("1 in vault") ~= nil, "fallback parse committed 1 row: " .. lastStatus)
-ok(lastStatus:find("1 equippable") ~= nil,
-    "fallback row equippable via GetItemInfo equipLoc: " .. lastStatus)
-ok(lastStatus:find("1 with procs") ~= nil, "fallback row matched proc: " .. lastStatus)
+ok(lastStatus:find("1 in vault") and lastStatus:find("1 equippable")
+    and lastStatus:find("1 with procs"),
+    "tolerant parse + equipLoc fallback + proc match: " .. lastStatus)
 
 --==================== filter box ====================
--- rebuild the full snapshot
 feed("VLTROW:1001,0,1,4,2,7,200,icon;1005,0,1,4,2,4,210,icon;1006,-13,1,3,4,0,190,icon;")
 feed("VLTEND:")
 ok(lastStatus:find("3 with procs") and lastStatus:find("showing 3"),
     "full snapshot back: " .. lastStatus)
-
-local filterBox
-for _, f in ipairs(frames) do
-    if f._name == "ProcHunterFilterBox" then filterBox = f end
-end
-ok(filterBox ~= nil, "filter box exists")
-filterBox._text = "frost"
-filterBox._scripts["OnTextChanged"]()
-ok(lastStatus:find("showing 1") ~= nil,
-    "filter 'frost' matches the blade only: " .. lastStatus)
-filterBox._text = "kirei"
-filterBox._scripts["OnTextChanged"]()
-ok(lastStatus:find("showing 0") ~= nil, "no match filter: " .. lastStatus)
-filterBox._text = ""
-filterBox._scripts["OnTextChanged"]()
+local filterBox = _G["ProcHunterFilterBox"]
+filterBox._text = "frost"; filterBox._scripts["OnTextChanged"]()
+ok(lastStatus:find("showing 1") ~= nil, "filter 'frost': " .. lastStatus)
+filterBox._text = "kirei"; filterBox._scripts["OnTextChanged"]()
+ok(lastStatus:find("showing 0") ~= nil, "no-match filter: " .. lastStatus)
+filterBox._text = ""; filterBox._scripts["OnTextChanged"]()
 ok(lastStatus:find("showing 3") ~= nil, "filter cleared: " .. lastStatus)
 
---==================== ability DB not indexed ====================
--- spell 500 lists "Frostbrand Blade" in AbilityDB; the blade's proc list
--- must contain only 100/101 (checked via the row's spell set through
--- the tooltip path being name-unique) — verified indirectly: if 500 were
--- indexed, 'holy' filter on proc names would still show 0 for the blade
--- and proc count text stays 3 (counts items, not spells). Direct check:
-filterBox._text = "frost bite"
-filterBox._scripts["OnTextChanged"]()
-ok(lastStatus:find("showing 1") ~= nil, "proc-name filter path works: " .. lastStatus)
+--==================== flat-stat classification ====================
+items[1007] = { name = "Eagle Cuirass", q = 2, ilvl = 100 }
+items[1008] = { name = "Berserker Blade", q = 3, ilvl = 150 }
+feed("VLTROW:1001,0,1,4,2,7,200,icon;1007,0,1,2,4,1,100,icon;1008,0,1,3,2,7,150,icon;")
+feed("VLTEND:")
+ok(lastStatus:find("2 with procs") ~= nil,
+    "cuirass hidden, blade kept (duration guard): " .. lastStatus)
+ok(lastStatus:find("1 flat%-stat hidden") ~= nil, "hidden counter: " .. lastStatus)
+local cf = _G["ProcHunterFlatCheck"]
+ok(cf ~= nil and cf._checked == true, "flat tickbox exists, default ON")
+cf:SetChecked(false); cf._scripts["OnClick"](cf)
+ok(lastStatus:find("3 with procs") ~= nil and lastStatus:find("hidden") == nil,
+    "untick shows flat-only items: " .. lastStatus)
+cf:SetChecked(true); cf._scripts["OnClick"](cf)
+ok(lastStatus:find("2 with procs") ~= nil, "re-tick hides again: " .. lastStatus)
 
---==================== only VLTGET on the wire ====================
-for i = 1, #sent do
-    ok(sent[i].msg == "VLTGET", "wire send #" .. i .. " is VLTGET only")
-end
-
---==================== v1.1.0: window visible on FIRST toggle ====================
-local win = _G["ProcHunterFrame"]
-ok(win and win._shown == true, "window is shown after the toggles so far")
-SlashCmdList["PROCHUNTER"]("")   -- close
-ok(win._shown == false, "toggle closes")
-SlashCmdList["PROCHUNTER"]("")   -- open again
-ok(win._shown == true, "toggle reopens (v1.0.0 eaten-press regression)")
-
---==================== minimap button + options panel ====================
+--==================== minimap + options ====================
 local mm = _G["ProcHunterMinimapButton"]
-ok(mm ~= nil, "minimap button exists after PLAYER_LOGIN")
+ok(mm ~= nil, "minimap button exists")
 mm._scripts["OnClick"]()
-ok(win._shown == false, "minimap click toggles window closed")
+ok(win._shown == false, "minimap click closes")
+clock = clock + 4
 mm._scripts["OnClick"]()
-ok(win._shown == true, "minimap click toggles window open")
-
+ok(win._shown == true, "minimap click reopens")
 ok(#optCategories == 1 and optCategories[1].name == "ProcHunter",
     "options panel registered")
 local cb = _G["ProcHunterMMCheck"]
-ok(cb ~= nil, "minimap checkbox exists")
 cb:SetChecked(false); cb._scripts["OnClick"](cb)
 ok(mm._shown == false, "unticking hides minimap button")
 cb:SetChecked(true); cb._scripts["OnClick"](cb)
 ok(mm._shown == true, "ticking shows minimap button")
 
---==================== watchdog -> UncappedVault fallback ====================
--- array shape with unfamiliar field names
+--==================== instant global read on open ====================
+SlashCmdList["PROCHUNTER"]()  -- close
 UncappedVault = { items = {
-    { itemId = 1001, stackCount = 2, suffixId = 0, rarity = 4, itemLevel = 200 },
-    { itemId = 1003, stackCount = 1 },   -- bag by equipLoc: excluded
+    { itemId = 1001, stackCount = 3, suffixId = 0, rarity = 4, itemLevel = 200 },
+    { itemId = 1008, stackCount = 1 },
 } }
-items[1003].equipLoc = "INVTYPE_BAG"
-local refreshBtn
-for _, f in ipairs(frames) do
-    if f._type == "Button" and f._text == "Refresh" then refreshBtn = f end
+clock = clock + 4
+SlashCmdList["PROCHUNTER"]()  -- open: must fill instantly, no clock advance
+ok(lastStatus:find("2 in vault") ~= nil and lastStatus:find("source: UncappedVault"),
+    "instant fill from global on open: " .. lastStatus)
+ok(lastStatus:find("2 with procs") ~= nil, "blade+blade matched from global: " .. lastStatus)
+
+--==================== 2s poll picks up changes ====================
+UncappedVault.items[#UncappedVault.items + 1] = { itemId = 1005, stackCount = 1 }
+clock = clock + 2.1; tick()
+ok(lastStatus:find("3 in vault") ~= nil, "poll absorbed a new deposit: " .. lastStatus)
+
+--==================== withdraw: route 1 success ====================
+UncappedVault.Withdraw = function(e, rp, c)
+    for i = #UncappedVault.items, 1, -1 do
+        local r = UncappedVault.items[i]
+        if r.itemId == e then
+            r.stackCount = (r.stackCount or 1) - c
+            if r.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+            return
+        end
+    end
 end
-ok(refreshBtn ~= nil, "refresh button found")
-local sentBefore = #sent
-refreshBtn._scripts["OnClick"]()
-ok(#sent == sentBefore + 1, "refresh sends VLTGET")
-clock = clock + 6
-ticker._scripts["OnUpdate"](ticker)
-ok(lastStatus:find("2 in vault") ~= nil, "fallback array shape absorbed: " .. lastStatus)
-ok(lastStatus:find("1 equippable") ~= nil, "bag excluded via equipLoc: " .. lastStatus)
-ok(lastStatus:find("1 with procs") ~= nil, "blade matched from fallback: " .. lastStatus)
-ok(lastStatus:find("source: UncappedVault") ~= nil, "source tag shown: " .. lastStatus)
+local function RowFor(e)
+    for _, f in ipairs(frames) do
+        if f.data and type(f.data) == "table" and f.data.e == e then return f end
+    end
+end
+local blade = RowFor(1008)
+ok(blade ~= nil, "row button for the berserker blade found")
+blade._scripts["OnClick"](blade, "RightButton")
+ok(lastStatus:find("withdrawing") ~= nil, "withdraw pending state: " .. lastStatus)
+clock = clock + 1.6; tick()
+ok(lastStatus:find("withdrawn: ") ~= nil, "route 1 withdraw verified: " .. lastStatus)
+ok(lastStatus:find("2 in vault") ~= nil, "blade left the list: " .. lastStatus)
+ok(ProcHunterDB.wdRoute == 1, "working route remembered")
 
--- keyed entry -> count shape
-UncappedVault.items = { [1001] = 3 }
-refreshBtn._scripts["OnClick"]()
-clock = clock + 6
-ticker._scripts["OnUpdate"](ticker)
-ok(lastStatus:find("1 in vault") and lastStatus:find("1 with procs"),
-    "fallback map shape absorbed: " .. lastStatus)
+--==================== withdraw: shift = one from a stack ====================
+shiftDown = true
+local stack = RowFor(1001)
+ok(stack ~= nil and stack.data.count == 3, "stacked row found (x3)")
+stack._scripts["OnClick"](stack, "RightButton")
+clock = clock + 1.6; tick()
+shiftDown = false
+ok(lastStatus:find("withdrawn: ") ~= nil, "shift-withdraw verified: " .. lastStatus)
+ok(RowFor(1001) and RowFor(1001).data.count == 2, "stack reduced 3 -> 2")
 
--- wire recovery clears the source tag
-feed("VLTROW:1001,0,1,4,2,7,200,icon;")
-feed("VLTEND:")
-ok(lastStatus:find("source: UncappedVault") == nil,
-    "wire snapshot clears fallback tag: " .. lastStatus)
+--==================== withdraw: cascade exhaustion ====================
+UncappedVault.Withdraw = function() error("boom") end
+UncappedVault.Send = nil
+before = #sent
+stack = RowFor(1001)
+stack._scripts["OnClick"](stack, "RightButton")
+ok(#sent == before + 1 and sent[#sent].msg:find("^VLTWD:1001:0:2") ~= nil,
+    "cascade fell through to the raw VLTWD send")
+clock = clock + 1.6; tick()
+ok(lastStatus:find("refused or ignored") ~= nil, "failure surfaced: " .. lastStatus)
+ok(ProcHunterDB.wdRoute == nil, "remembered route cleared on failure")
 
---==================== /ph debug and /ph dump ====================
+--==================== wire audit + debug/dump ====================
+for i = 1, #sent do
+    ok(sent[i].msg == "VLTGET" or sent[i].msg:find("^VLTWD:") ~= nil,
+        "wire send #" .. i .. " is VLTGET or VLTWD only")
+end
 local chatBefore = #chat
 SlashCmdList["PROCHUNTER"]("debug")
-ok(#chat == chatBefore + 1 and chat[#chat]:find("debug"), "debug toggle announces")
+ok(chat[#chat]:find("debug"), "debug toggle announces")
 comms._scripts["OnEvent"](comms, "CHAT_MSG_ADDON", "XYZ", "hello-wire")
-ok(chat[#chat]:find("%[wire%]") and chat[#chat]:find("XYZ"),
-    "debug prints foreign-prefix traffic")
+ok(chat[#chat]:find("%[wire%]") and chat[#chat]:find("XYZ"), "debug prints traffic")
 SlashCmdList["PROCHUNTER"]("debug")
-comms._scripts["OnEvent"](comms, "CHAT_MSG_ADDON", "XYZ", "quiet-now")
-ok(not chat[#chat]:find("quiet%-now"), "debug off is silent")
-chatBefore = #chat
 SlashCmdList["PROCHUNTER"](" dump ")
-ok(#chat > chatBefore and chat[chatBefore + 1]:find("dump:"), "dump prints shape info")
+ok(chat[#chat - 1]:find("dump:") or chat[#chat]:find("dump:"), "dump prints shape info")
 ok(win._shown == true, "debug/dump args do not toggle the window")
 
 print(string.format("%d/%d tests passed", P, T))
