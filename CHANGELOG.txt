@@ -1,6 +1,20 @@
 ProcHunter — Changelog
 ======================
 
+v1.3.1 (2026-09-11)
+-------------------
+Withdraw semantics INVERTED after v1.3.0's whole-stack default filled
+102 bag slots with Twilight Scales on a 17k stack:
+- Right-click now withdraws exactly ONE. Always. No loop, no bulk.
+- Shift+Right-click opens an amount dialog: type how many (Enter or
+  the Withdraw button confirms, Escape or Cancel aborts; the amount
+  is clamped to the stack count, and the item is re-checked against
+  the live list on confirm). The target loop then pulls exactly that
+  many, with the same live progress and honest "N of M (stopped)"
+  reporting as before.
+Bulk can no longer happen by accident — it always requires typing a
+number.
+
 v1.3.0 (2026-09-11)
 -------------------
 - FIX: withdrawing a stack now delivers the WHOLE stack. The live
