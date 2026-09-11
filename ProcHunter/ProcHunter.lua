@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.2.0 — Uncapped Vault proc scanner
+-- ProcHunter v1.3.0 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -13,11 +13,15 @@
 --
 -- WITHDRAW: the working call into kirei's addon is unknown until the
 -- current UncappedVault.lua is dissected, so withdrawal is a VERIFIED
--- CASCADE of harmless-if-wrong attempts — after each route it waits
--- 1.5s, re-reads the vault, and only moves to the next route if the
--- item did not move. At most one route can take effect. The first
--- route that works is remembered (db.wdRoute) and used directly from
--- then on.
+-- CASCADE of harmless-if-wrong attempts — after each route it waits,
+-- re-reads the vault, and only moves to the next route if the item
+-- did not move. At most one route can take effect; the first that
+-- works is remembered (db.wdRoute). CONFIRMED LIVE: the working
+-- route delivers ONE copy per call and ignores the count, so a
+-- withdrawal is target-based — the proven route is re-fired on a
+-- ~0.9s cadence, measuring the actual delta each cycle, until the
+-- requested count has moved, the row is gone, or deliveries stop
+-- (then it reports "N of M (stopped)").
 --
 -- Slash: /ph, /prochunter        toggle the window
 --        /ph debug               print all addon wire traffic (toggle)
@@ -29,7 +33,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.2.0"
+local VERSION = "1.3.0"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -39,8 +43,18 @@ local PRIME_INTERVAL   = 1     -- seconds between item-cache retry passes
 local PRIME_MAX_TRIES  = 20    -- give up on an uncached item after this
 local WIRE_WATCHDOG    = 5     -- silent seconds before the global fallback
 local POLL_INTERVAL    = 2     -- global re-read cadence while window open
-local WD_VERIFY_DELAY  = 1.5   -- seconds before checking a withdraw route
+local WD_VERIFY_DELAY  = 1.5   -- seconds before verifying an unproven route
+local WD_REPEAT_DELAY  = 0.9   -- cadence once the route is proven
 local WD_MAX_ROUTE     = 5
+local WD_MAX_CYCLES    = 200   -- hard cap on repeat cycles per withdrawal
+
+-- client built-in fonts (zero size cost)
+local FONTS = {
+    { name = "Friz Quadrata", path = "Fonts\\FRIZQT__.TTF" },
+    { name = "Arial Narrow",  path = "Fonts\\ARIALN.TTF" },
+    { name = "Skurri",        path = "Fonts\\skurri.ttf" },
+    { name = "Morpheus",      path = "Fonts\\MORPHEUS.ttf" },
+}
 
 local floor  = math.floor
 local format = string.format
@@ -74,10 +88,13 @@ local eqCount, procCount = 0, 0
 local dataSource   = nil    -- "wire" | "UncappedVault"
 local lastSig      = nil    -- change-detection signature of the snapshot
 local wireDebug    = false
-local pendingWD    = nil    -- in-flight withdraw {e,rp,count,before,name,route,at}
+local pendingWD    = nil    -- in-flight withdraw (target-based; see header)
 local wdDoneAt     = nil    -- show "withdrawn" until this fades
 local wdDoneName   = nil
 local wdFailed     = false
+local visRows      = 14     -- rows that fit the current window height
+local ROWH         = 22     -- current row height (depends on font size)
+local ApplyLook             -- forward: applies font/size/alpha + relayout
 
 --========================= small helpers =============================
 local function Msg(text)
@@ -156,6 +173,10 @@ end
 local function IsFlatLine(t)
     if find(t, "for %d+ sec") or find(t, "lasts %d") or find(t, " until ")
     then return false end
+    -- Michael's rule: any PERCENTAGE bonus is a real effect and stays
+    -- visible ("Improves critical strike damage by 3.15%") — only
+    -- plain-number flat stats are hidden.
+    if find(t, "%d%%") then return false end
     return (find(t, "^%+%d") 
         or find(t, "^increases? .+ by %d")
         or find(t, "^increases? .+ by up to %d")
@@ -429,28 +450,34 @@ local function RowCount(e, rp)
     return 0
 end
 
--- Fire the next plausible withdraw route. Every attempt is
--- pcall-guarded and harmless if wrong; the verify step between routes
--- guarantees at most one takes effect. Returns true if something was
--- fired, false when the cascade is exhausted.
-local function FireWithdrawRoute(w)
+-- Fire exactly route L. Every attempt is pcall-guarded and harmless
+-- if wrong; verification between firings guarantees at most one route
+-- ever takes effect. The verb carries the remaining count for
+-- count-honoring routes; the live route ignores it (one per call).
+local function TryRoute(w, L)
     local UV = _G.UncappedVault
-    local verb = format("VLTWD:%d:%d:%d", w.e, w.rp or 0, w.count)
+    local rem = w.target - w.moved
+    if rem < 1 then rem = 1 end
+    local verb = format("VLTWD:%d:%d:%d", w.e, w.rp or 0, rem)
+    if L == 1 and UV and type(UV.Withdraw) == "function" then
+        return pcall(UV.Withdraw, w.e, w.rp or 0, rem) and true or false
+    elseif L == 2 and UV and type(UV.Withdraw) == "function" then
+        return pcall(UV.Withdraw, UV, w.e, w.rp or 0, rem) and true or false
+    elseif L == 3 and UV and type(UV.Send) == "function" then
+        return pcall(UV.Send, verb) and true or false
+    elseif L == 4 and UV and type(UV.Send) == "function" then
+        return pcall(UV.Send, UV, verb) and true or false
+    elseif L == 5 then
+        SendAddonMessage(SEND_PREFIX, verb, "WHISPER", UnitName("player"))
+        return true
+    end
+    return false
+end
+
+local function CascadeNext(w)
     while w.route < WD_MAX_ROUTE do
         w.route = w.route + 1
-        local L = w.route
-        if L == 1 and UV and type(UV.Withdraw) == "function" then
-            if pcall(UV.Withdraw, w.e, w.rp or 0, w.count) then return true end
-        elseif L == 2 and UV and type(UV.Withdraw) == "function" then
-            if pcall(UV.Withdraw, UV, w.e, w.rp or 0, w.count) then return true end
-        elseif L == 3 and UV and type(UV.Send) == "function" then
-            if pcall(UV.Send, verb) then return true end
-        elseif L == 4 and UV and type(UV.Send) == "function" then
-            if pcall(UV.Send, UV, verb) then return true end
-        elseif L == 5 then
-            SendAddonMessage(SEND_PREFIX, verb, "WHISPER", UnitName("player"))
-            return true
-        end
+        if TryRoute(w, w.route) then return true end
     end
     return false
 end
@@ -459,13 +486,13 @@ local function StartWithdraw(m, count)
     if pendingWD then return end -- one at a time
     wdFailed, wdDoneAt, wdDoneName = false, nil, nil
     pendingWD = {
-        e = m.e, rp = m.rp or 0, count = count,
-        before = m.count or 1, name = m.name or "?",
-        -- start at the remembered good route, if any
+        e = m.e, rp = m.rp or 0,
+        target = count, moved = 0, cycles = 0, proven = false,
+        lastCount = m.count or 1, name = m.name or "?",
         route = (db.wdRoute and db.wdRoute - 1) or 0,
         at = GetTime(),
     }
-    if not FireWithdrawRoute(pendingWD) then
+    if not CascadeNext(pendingWD) then
         pendingWD = nil
         wdFailed = true
         db.wdRoute = nil
@@ -474,19 +501,55 @@ local function StartWithdraw(m, count)
 end
 
 local function CheckWithdraw(now)
-    if not pendingWD or now - pendingWD.at < WD_VERIFY_DELAY then return end
-    TryVaultGlobal()
+    if not pendingWD then return end
     local w = pendingWD
-    if RowCount(w.e, w.rp) < w.before then
-        db.wdRoute = w.route          -- remember what worked
-        wdDoneAt, wdDoneName = now, w.name
-        pendingWD = nil
-    elseif FireWithdrawRoute(w) then
-        w.at = now                    -- next route armed, verify again
+    if now - w.at < (w.proven and WD_REPEAT_DELAY or WD_VERIFY_DELAY) then
+        return
+    end
+    TryVaultGlobal()
+    local c = RowCount(w.e, w.rp)
+    local delta = (w.lastCount or 0) - c
+    if delta > 0 then
+        -- something moved: this route is the real one
+        w.moved = w.moved + delta
+        w.lastCount = c
+        w.proven = true
+        db.wdRoute = w.route
+        if w.moved >= w.target or c == 0 then
+            wdDoneAt = now
+            wdDoneName = w.name ..
+                ((w.target > 1) and format(" x%d", w.moved) or "")
+            pendingWD = nil
+        elseif w.cycles >= WD_MAX_CYCLES then
+            wdDoneAt = now
+            wdDoneName = format("%s — %d of %d (stopped)",
+                w.name, w.moved, w.target)
+            pendingWD = nil
+        else
+            -- the live route delivers one copy per call: re-fire the
+            -- proven route until the target is reached
+            w.cycles = w.cycles + 1
+            TryRoute(w, w.route)
+            w.at = now
+        end
     else
-        pendingWD = nil               -- cascade exhausted
-        wdFailed = true
-        db.wdRoute = nil
+        if w.proven then
+            -- the proven route stopped delivering (bags full? refusal?)
+            if w.moved > 0 then
+                wdDoneAt = now
+                wdDoneName = format("%s — %d of %d (stopped)",
+                    w.name, w.moved, w.target)
+            else
+                wdFailed = true
+            end
+            pendingWD = nil
+        elseif CascadeNext(w) then
+            w.at = now
+        else
+            pendingWD = nil
+            wdFailed = true
+            db.wdRoute = nil
+        end
     end
     if RefreshList then RefreshList() end
 end
@@ -555,7 +618,7 @@ ticker:SetScript("OnUpdate", function()
 end)
 
 --========================= UI ========================================
-local ROWS, ROW_H = 14, 22
+local MAX_ROWS = 40
 
 local function QualityHex(q)
     local c = q and ITEM_QUALITY_COLORS[q]
@@ -674,15 +737,16 @@ local function BuildUI()
     scroll:SetPoint("TOPLEFT", 16, -64)
     scroll:SetPoint("BOTTOMRIGHT", -36, 34)
     scroll:SetScript("OnVerticalScroll", function(self, offset)
-        FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, RefreshList)
+        FauxScrollFrame_OnVerticalScroll(self, offset, ROWH, RefreshList)
     end)
     ui.scroll = scroll
 
     ui.rows = {}
-    for i = 1, ROWS do
+
+    local function CreateRow(i)
         local r = CreateFrame("Button", nil, ui)
-        r:SetHeight(ROW_H)
-        r:SetPoint("TOPLEFT", 18, -64 - (i - 1) * ROW_H)
+        r:SetHeight(ROWH)
+        r:SetPoint("TOPLEFT", 18, -64 - (i - 1) * ROWH)
         r:SetPoint("RIGHT", scroll, "RIGHT", -4, 0)
         r:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         r:RegisterForClicks("RightButtonUp")
@@ -716,9 +780,77 @@ local function BuildUI()
         r:SetScript("OnLeave", function() GameTooltip:Hide() end)
         r:Hide()
         ui.rows[i] = r
+        return r
     end
 
-    -- frames are SHOWN by default on 3.3.5a: without this, the first
+    local function EnsureRows(n)
+        for i = #ui.rows + 1, n do CreateRow(i) end
+    end
+
+    local function LayoutRows()
+        local w = ui:GetWidth() or 600
+        local h = ui:GetHeight() or 430
+        ROWH = floor((db.fontSize or 11) + 9)
+        if ROWH < 16 then ROWH = 16 end
+        visRows = floor((h - 98) / ROWH)
+        if visRows < 4 then visRows = 4 end
+        if visRows > MAX_ROWS then visRows = MAX_ROWS end
+        EnsureRows(visRows)
+        local nameW = floor((w - 160) * 0.55)
+        if nameW < 120 then nameW = 120 end
+        local path = FONTS[db.font or 1].path
+        local size = db.fontSize or 11
+        for i = 1, #ui.rows do
+            local r = ui.rows[i]
+            r:SetHeight(ROWH)
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", 18, -64 - (i - 1) * ROWH)
+            r:SetPoint("RIGHT", scroll, "RIGHT", -4, 0)
+            r.name:SetWidth(nameW)
+            r.ilvl:SetFont(path, size)
+            r.name:SetFont(path, size)
+            r.proc:SetFont(path, size)
+            if i > visRows then r:Hide() end
+        end
+        ui.status:SetFont(path, size)
+    end
+    ui.LayoutRows = LayoutRows
+
+    ApplyLook = function()
+        if not ui then return end
+        ui:SetAlpha(db.alpha or 1)
+        LayoutRows()
+        if RefreshList then RefreshList() end
+    end
+
+    -- resizable: bottom-right grip, size saved, rows recomputed live
+    ui:SetResizable(true)
+    ui:SetMinResize(430, 240)
+    ui:SetMaxResize(1200, 900)
+    if db.size then
+        ui:SetWidth(db.size.w); ui:SetHeight(db.size.h)
+    end
+    local grip = CreateFrame("Button", nil, ui)
+    grip:SetWidth(16); grip:SetHeight(16)
+    grip:SetPoint("BOTTOMRIGHT", -6, 6)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function() ui:StartSizing("BOTTOMRIGHT") end)
+    grip:SetScript("OnMouseUp", function()
+        ui:StopMovingOrSizing()
+        db.size = { w = floor(ui:GetWidth() or 600),
+                    h = floor(ui:GetHeight() or 430) }
+    end)
+    ui:SetScript("OnSizeChanged", function()
+        if ui.LayoutRows then
+            ui.LayoutRows()
+            if RefreshList then RefreshList() end
+        end
+    end)
+
+    ApplyLook()
+
+        -- frames are SHOWN by default on 3.3.5a: without this, the first
     -- toggle press builds the window already "shown" and instantly
     -- hides it (press silently eaten — hit live in v1.0.0)
     ui:Hide()
@@ -744,11 +876,11 @@ RefreshList = function()
         if keep then shown[#shown + 1] = m end
     end
 
-    FauxScrollFrame_Update(ui.scroll, #shown, ROWS, ROW_H)
+    FauxScrollFrame_Update(ui.scroll, #shown, visRows, ROWH)
     local offset = FauxScrollFrame_GetOffset(ui.scroll)
-    for i = 1, ROWS do
+    for i = 1, #ui.rows do
         local r = ui.rows[i]
-        local m = shown[i + offset]
+        local m = (i <= visRows) and shown[i + offset] or nil
         if m then
             r.data = m
             r.icon:SetTexture(GetItemIcon(m.e) or
@@ -780,8 +912,8 @@ RefreshList = function()
         tail = tail .. format("  ·  |cff888888%d flat-stat hidden|r", flatHidden)
     end
     if pendingWD then
-        tail = tail .. format("  ·  |cff80ffffwithdrawing %s (route %d/%d)...|r",
-            pendingWD.name, pendingWD.route, WD_MAX_ROUTE)
+        tail = tail .. format("  ·  |cff80ffffwithdrawing %s %d/%d (route %d)...|r",
+            pendingWD.name, pendingWD.moved, pendingWD.target, pendingWD.route)
     elseif wdDoneAt then
         tail = tail .. format("  ·  |cff33ff33withdrawn: %s|r", wdDoneName or "")
     elseif wdFailed then
@@ -898,8 +1030,55 @@ local function BuildOptions()
         Rebuild()
     end)
 
+    local function MakeSlider(sname, label, minV, maxV, step, getV, setV, anchor, dy)
+        local sl = CreateFrame("Slider", sname, p, "OptionsSliderTemplate")
+        sl:SetWidth(190)
+        sl:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 4, dy)
+        sl:SetMinMaxValues(minV, maxV)
+        sl:SetValueStep(step)
+        _G[sname .. "Low"]:SetText(tostring(minV))
+        _G[sname .. "High"]:SetText(tostring(maxV))
+        _G[sname .. "Text"]:SetText(label .. ": " .. floor(getV() + 0.5))
+        sl._loading = true
+        sl:SetValue(getV())
+        sl._loading = false
+        sl:SetScript("OnValueChanged", function(self, v)
+            if self._loading then return end
+            v = floor((v or 0) + 0.5)
+            _G[sname .. "Text"]:SetText(label .. ": " .. v)
+            setV(v)
+        end)
+        return sl
+    end
+
+    local opSlider = MakeSlider("ProcHunterOpacitySlider", "Window opacity %",
+        20, 100, 5,
+        function() return (db.alpha or 1) * 100 end,
+        function(v)
+            db.alpha = v / 100
+            if ui then ui:SetAlpha(db.alpha) end
+        end, cf, -28)
+
+    local fsSlider = MakeSlider("ProcHunterFontSizeSlider", "Font size",
+        8, 18, 1,
+        function() return db.fontSize or 11 end,
+        function(v)
+            db.fontSize = v
+            if ApplyLook then ApplyLook() end
+        end, opSlider, -28)
+
+    local fontBtn = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
+    fontBtn:SetWidth(190); fontBtn:SetHeight(22)
+    fontBtn:SetPoint("TOPLEFT", fsSlider, "BOTTOMLEFT", -4, -16)
+    fontBtn:SetText("Font: " .. FONTS[db.font or 1].name)
+    fontBtn:SetScript("OnClick", function(self)
+        db.font = ((db.font or 1) % #FONTS) + 1
+        self:SetText("Font: " .. FONTS[db.font].name)
+        if ApplyLook then ApplyLook() end
+    end)
+
     local h = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    h:SetPoint("TOPLEFT", cf, "BOTTOMLEFT", 4, -14)
+    h:SetPoint("TOPLEFT", fontBtn, "BOTTOMLEFT", 4, -14)
     h:SetPoint("RIGHT", -20, 0)
     h:SetJustifyH("LEFT")
     h:SetText("Slash commands: |cffffd100/ph|r toggle window  ·  " ..
@@ -947,6 +1126,9 @@ init:SetScript("OnEvent", function(_, event, arg1)
         ProcHunterDB = ProcHunterDB or {}
         db = ProcHunterDB
         if db.hideFlat == nil then db.hideFlat = true end
+        if db.fontSize == nil then db.fontSize = 11 end
+        if db.alpha == nil then db.alpha = 1 end
+        if db.font == nil then db.font = 1 end
         BuildOptions()
     elseif event == "PLAYER_LOGIN" then
         BuildMinimapButton()
