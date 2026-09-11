@@ -341,15 +341,24 @@ ok(lastStatus:find("withdrawn: ") ~= nil, "route 1 withdraw verified: " .. lastS
 ok(lastStatus:find("2 in vault") ~= nil, "blade left the list: " .. lastStatus)
 ok(ProcHunterDB.wdRoute == 1, "working route remembered")
 
---==================== withdraw: shift = one from a stack ====================
-shiftDown = true
+--==================== withdraw: right-click is ALWAYS one ====================
 local stack = RowFor(1001)
 ok(stack ~= nil and stack.data.count == 3, "stacked row found (x3)")
-stack._scripts["OnClick"](stack, "RightButton")
+stack._scripts["OnClick"](stack, "RightButton") -- plain right-click
 clock = clock + 1.6; tick()
+ok(lastStatus:find("withdrawn: ") ~= nil, "plain right-click withdrew: " .. lastStatus)
+ok(RowFor(1001) and RowFor(1001).data.count == 2,
+    "exactly ONE left the stack (3 -> 2)")
+
+--==================== amount dialog: open + cancel ====================
+shiftDown = true
+RowFor(1001)._scripts["OnClick"](RowFor(1001), "RightButton")
 shiftDown = false
-ok(lastStatus:find("withdrawn: ") ~= nil, "shift-withdraw verified: " .. lastStatus)
-ok(RowFor(1001) and RowFor(1001).data.count == 2, "stack reduced 3 -> 2")
+local dlg = _G["ProcHunterAmountDialog"]
+ok(dlg ~= nil and dlg._shown == true, "amount dialog opens on shift")
+dlg.cancelBtn._scripts["OnClick"]()
+ok(dlg._shown == false, "cancel closes the dialog")
+ok(RowFor(1001).data.count == 2, "cancel withdrew nothing")
 
 --==================== withdraw: cascade exhaustion ====================
 UncappedVault.Withdraw = function() error("boom") end
@@ -357,8 +366,8 @@ UncappedVault.Send = nil
 before = #sent
 stack = RowFor(1001)
 stack._scripts["OnClick"](stack, "RightButton")
-ok(#sent == before + 1 and sent[#sent].msg:find("^VLTWD:1001:0:2") ~= nil,
-    "cascade fell through to the raw VLTWD send")
+ok(#sent == before + 1 and sent[#sent].msg:find("^VLTWD:1001:0:1") ~= nil,
+    "cascade fell through to the raw VLTWD send (count 1)")
 clock = clock + 1.6; tick()
 ok(lastStatus:find("refused or ignored") ~= nil, "failure surfaced: " .. lastStatus)
 ok(ProcHunterDB.wdRoute == nil, "remembered route cleared on failure")
@@ -376,7 +385,12 @@ UncappedVault.Withdraw = function(e, rp, c)  -- live behavior: ignores count
 end
 local stack2 = RowFor(1001)
 ok(stack2 and stack2.data.count == 2, "stack x2 present for loop test")
+shiftDown = true
 stack2._scripts["OnClick"](stack2, "RightButton")
+shiftDown = false
+local dlg2 = _G["ProcHunterAmountDialog"]
+dlg2.edit:SetText("99") -- over the stack: must clamp to 2
+dlg2.okBtn._scripts["OnClick"]()
 clock = clock + 1.6; tick()
 ok(lastStatus:find("withdrawing") ~= nil and lastStatus:find("1/2") ~= nil,
     "one copy moved, loop continuing: " .. lastStatus)
@@ -399,7 +413,12 @@ end
 clock = clock + 2.1; tick() -- poll absorbs the new row
 local ring = RowFor(1006)
 ok(ring and ring.data.count == 4, "ring x4 present for partial test")
+shiftDown = true
 ring._scripts["OnClick"](ring, "RightButton")
+shiftDown = false
+local dlg3 = _G["ProcHunterAmountDialog"]
+dlg3.edit:SetText("4")
+dlg3.okBtn._scripts["OnClick"]()
 clock = clock + 1.6; tick()
 clock = clock + 1.0; tick()
 clock = clock + 1.0; tick()
