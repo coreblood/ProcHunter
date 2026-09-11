@@ -2,7 +2,7 @@
 ## Title: ProcHunter
 ## Notes: Scans your Uncapped Vault for equippable items that carry a proc.
 ## Author: Mhortai
-## Version: 1.5.3
+## Version: 1.5.4
 ## SavedVariables: ProcHunterDB
 
 ProcHunter_ProcDB.lua
