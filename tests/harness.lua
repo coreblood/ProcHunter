@@ -55,7 +55,8 @@ function GetItemIcon() return "tex" end
 
 local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [888] = "Enrage", [999] = "Increase Intellect 24",
-    [777] = "Crit Aura", [555] = "Fire Burst", [556] = "Ice Burst" }
+    [777] = "Crit Aura", [555] = "Fire Burst", [556] = "Ice Burst",
+    [890] = "Enrage", [701] = "Stone Skin" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
@@ -711,6 +712,65 @@ clock = clock + 6.1; tick()            -- locate timeout
 local exd4 = _G["ProcHunterExtractDialog"]
 ok(exd4._shown == true, "timeout salvaged the cached rows into the dialog")
 exd4.cancelBtn._scripts["OnClick"]()
+
+--==================== extract flow: server bag numbering ====================
+-- confirmed live: the server numbers bags/slots differently than the
+-- client, so the pinned key NEVER matches a pushed ICITEM:B header.
+-- Resolution must fall back to the item's own proc names — and only
+-- while exactly ONE copy of the item sits in bags.
+-- (890 = a rank variant of Enrage, unseen by collSet so selectable)
+-- First: bags still hold old blade copies -> must abort as ambiguous.
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade6 = RowFor(1008)
+ok(blade6 ~= nil, "blade back for server-numbering test")
+ctrlDown = true
+blade6._scripts["OnClick"](blade6, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()            -- pin slot; cache empty -> locate
+feed("ICITEM:B:1:6")                   -- server coords: match nothing client-side
+feed("ICIPROC:890:2:15:0")             -- Enrage rank variant: name matches item
+feed("ICINVEND")
+ok(lastStatus:find("keep exactly ONE") ~= nil,
+    "duplicate copies force a safe abort: " .. lastStatus)
+-- clear ALL blade copies from bags, keep none
+for b = 0, 4 do
+    for slot = 1, 16 do
+        if bagContents[b] and bagContents[b][slot] == 1008 then
+            bagContents[b][slot] = nil
+        end
+    end
+end
+-- retry with a clean bag: exactly one copy after the withdraw
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade7 = RowFor(1008)
+ctrlDown = true
+blade7._scripts["OnClick"](blade7, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()            -- pin; miss; locate + requests
+local cSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1008 then cSlot = slot end
+end
+ok(cSlot ~= nil, "single clean copy in bags")
+feed("ICITEM:B:1:6")                   -- server's own numbering
+feed("ICIPROC:890:2:15:0")
+feed("ICITEM:B:4:19")                  -- unrelated item, non-matching proc
+feed("ICIPROC:701:1:5:0")
+feed("ICINVEND")
+local exd5 = _G["ProcHunterExtractDialog"]
+ok(exd5._shown == true, "dialog opened via proc-name resolution")
+ok(exd5.rows[1].row.spell == 890, "rank-variant proc resolved")
+clock = clock + 1.6; tick()
+exd5.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg == "ICUNLOCK:1:6:890:2",
+    "ICUNLOCK echoes the SERVER's coords, not the client's")
+feed("ICUNLOCKED:890:2")
+ok(lastStatus:find("unlocked") ~= nil,
+    "server-numbering path completes: " .. lastStatus)
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
