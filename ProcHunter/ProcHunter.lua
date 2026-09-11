@@ -1,18 +1,23 @@
 --=====================================================================
--- ProcHunter v1.1.0 — Uncapped Vault proc scanner (read-only)
+-- ProcHunter v1.2.0 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
--- spell found in the bundled proc database.
+-- spell found in the bundled proc database. Right-click withdraws.
 --
--- WIRE SAFETY: the only thing this addon ever sends is VLTGET — the
--- same read-only snapshot request the Dashboard's Vault tab sends.
--- It never deposits, withdraws, consumes or modifies anything.
+-- Data path (confirmed live 2026-09-11): the realm does NOT answer a
+-- third-party VLTGET — _G.UncappedVault.items is the real source. It
+-- is read instantly on open and re-read every 2s while the window is
+-- open. VLTGET is still sent underneath; a wire snapshot, if one ever
+-- arrives, always takes over (and would bring VLTUPD-driven updates).
 --
--- Data sources, in order:
---   1. VLTGET -> VLTROW/VLTEND snapshot on the UNC prefix
---   2. If the wire stays silent for 5s, the UncappedVault addon's own
---      items table (_G.UncappedVault.items) is read directly.
+-- WITHDRAW: the working call into kirei's addon is unknown until the
+-- current UncappedVault.lua is dissected, so withdrawal is a VERIFIED
+-- CASCADE of harmless-if-wrong attempts — after each route it waits
+-- 1.5s, re-reads the vault, and only moves to the next route if the
+-- item did not move. At most one route can take effect. The first
+-- route that works is remembered (db.wdRoute) and used directly from
+-- then on.
 --
 -- Slash: /ph, /prochunter        toggle the window
 --        /ph debug               print all addon wire traffic (toggle)
@@ -24,7 +29,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.1.0"
+local VERSION = "1.2.0"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -33,6 +38,9 @@ local DIRTY_DEBOUNCE   = 2     -- wait after a VLTUPD before re-requesting
 local PRIME_INTERVAL   = 1     -- seconds between item-cache retry passes
 local PRIME_MAX_TRIES  = 20    -- give up on an uncached item after this
 local WIRE_WATCHDOG    = 5     -- silent seconds before the global fallback
+local POLL_INTERVAL    = 2     -- global re-read cadence while window open
+local WD_VERIFY_DELAY  = 1.5   -- seconds before checking a withdraw route
+local WD_MAX_ROUTE     = 5
 
 local floor  = math.floor
 local format = string.format
@@ -45,23 +53,31 @@ local match  = string.match
 -- (declared above every function that reads them — hard rule)
 local db                    -- ProcHunterDB (SavedVariables)
 local nameIndex             -- lowered item name -> array of proc spellIds
+local spellClass = {}       -- spellId -> "flat" | "proc" (session cache)
 local vault      = {}       -- committed snapshot rows
 local staging    = {}       -- "e:rp" -> row, during a VLTROW stream
-local matched    = {}       -- rows passing both filters (display source)
+local matched    = {}       -- rows passing filters (display source)
 local shown      = {}       -- matched after the text filter
 local pending    = {}       -- entry -> retry count (waiting on item cache)
 local pendingN   = 0
+local flatHidden = 0        -- items hidden by the flat-stat filter
 local ui                    -- main window (lazy)
 local mmBtn                 -- minimap button (lazy)
-local scanTip               -- hidden tooltip used only to prime item cache
+local scanTip               -- hidden tooltip: item-cache priming + spell scans
 local snapshotSeen = false
 local lastRequest  = 0
 local dirtyAt      = nil    -- GetTime() of last unhandled vault change
 local awaitingAt   = nil    -- GetTime() of an unanswered VLTGET
 local primeAt      = 0
+local pollAt       = 0
 local eqCount, procCount = 0, 0
 local dataSource   = nil    -- "wire" | "UncappedVault"
+local lastSig      = nil    -- change-detection signature of the snapshot
 local wireDebug    = false
+local pendingWD    = nil    -- in-flight withdraw {e,rp,count,before,name,route,at}
+local wdDoneAt     = nil    -- show "withdrawn" until this fades
+local wdDoneName   = nil
+local wdFailed     = false
 
 --========================= small helpers =============================
 local function Msg(text)
@@ -76,11 +92,18 @@ local function ItemLink(e, rp)
     return format("item:%d:0:0:0:0:0:%d", e, rp or 0)
 end
 
--- Equippable by anyone: the wire row's item class is server truth —
+local function GetScanTip()
+    if not scanTip then
+        scanTip = CreateFrame("GameTooltip", "ProcHunterScanTip",
+            nil, "GameTooltipTemplate")
+        scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    end
+    return scanTip
+end
+
+-- Equippable by anyone: the row's item class is server truth —
 -- 2 = weapon, 4 = armor (rings/trinkets/necks/cloaks/shields/relics
--- included). Bags (class 1), ammo, consumables etc. drop out here.
--- Rows without a class field (tolerant parse / global fallback) use
--- GetItemInfo's equip slot instead (needs the item cache).
+-- included). Rows without a class field use GetItemInfo's equip slot.
 local function IsEquippable(row)
     if row.class then
         return row.class == 2 or row.class == 4
@@ -122,15 +145,56 @@ local function BuildIndex()
     -- player abilities, not item effects.
 end
 
+--=================== flat-stat spell classification ==================
+-- "+24 Intelligence"-style old-world bonuses are on-equip aura SPELLS,
+-- so they matched the database like procs. Each candidate spell's own
+-- tooltip is scanned once (spell data is client-local — instant, no
+-- cache wait; the realm-shipped descScan pattern). A spell counts as a
+-- passive flat bonus only if EVERY effect line is plain stat text with
+-- no duration — anything unrecognised classifies as a real proc, so
+-- uncertainty always keeps an item visible.
+local function IsFlatLine(t)
+    if find(t, "for %d+ sec") or find(t, "lasts %d") or find(t, " until ")
+    then return false end
+    return (find(t, "^%+%d") 
+        or find(t, "^increases? .+ by %d")
+        or find(t, "^increases? .+ by up to %d")
+        or find(t, "^improves? .+ by %d")
+        or find(t, "^improves? .+ by up to %d")
+        or find(t, "^decreases? .+ by %d")
+        or find(t, "^reduces? .+ by %d")
+        or find(t, "^restores %d+ .+ per %d+ sec")) and true or false
+end
+
+local function ClassifySpell(id)
+    local c = spellClass[id]
+    if c then return c end
+    local tip = GetScanTip()
+    tip:ClearLines()
+    tip:SetHyperlink("spell:" .. id)
+    local n = tip:NumLines() or 0
+    local sawEffect, allFlat = false, true
+    for i = 2, n do
+        local fs = _G["ProcHunterScanTipTextLeft" .. i]
+        local t = fs and fs:GetText()
+        t = t and strtrim(lower(t)) or ""
+        if t ~= "" and t ~= "passive" and not find(t, "^rank %d")
+            and not find(t, "^requires") then
+            sawEffect = true
+            if not IsFlatLine(t) then allFlat = false; break end
+        end
+    end
+    -- no readable effect text (custom/unknown spell) => keep visible
+    c = (sawEffect and allFlat) and "flat" or "proc"
+    spellClass[id] = c
+    return c
+end
+
 --========================= cache priming =============================
 local function Prime(e)
-    if not scanTip then
-        scanTip = CreateFrame("GameTooltip", "ProcHunterScanTip",
-            nil, "GameTooltipTemplate")
-        scanTip:SetOwner(UIParent, "ANCHOR_NONE")
-    end
-    scanTip:ClearLines()
-    scanTip:SetHyperlink("item:" .. e)
+    local tip = GetScanTip()
+    tip:ClearLines()
+    tip:SetHyperlink("item:" .. e)
 end
 
 --========================= match pass ================================
@@ -140,13 +204,12 @@ local function Rebuild()
     BuildIndex()
     for k in pairs(matched) do matched[k] = nil end
     for k in pairs(pending) do pending[k] = nil end
-    pendingN, eqCount, procCount = 0, 0, 0
+    pendingN, eqCount, procCount, flatHidden = 0, 0, 0, 0
 
     for i = 1, #vault do
         local row = vault[i]
         local eq = IsEquippable(row)
         if eq == nil then
-            -- class unknown AND item uncached: park it
             if not pending[row.e] then
                 pending[row.e] = 0; pendingN = pendingN + 1; Prime(row.e)
             end
@@ -160,14 +223,29 @@ local function Rebuild()
             else
                 local spells = nameIndex[lower(baseName)]
                 if spells and #spells > 0 then
-                    procCount = procCount + 1
-                    local link = ItemLink(row.e, row.rp)
-                    local dispName = GetItemInfo(link) or baseName
-                    matched[#matched + 1] = {
-                        e = row.e, rp = row.rp, count = row.count,
-                        q = row.q, ilvl = row.ilvl,
-                        name = dispName, link = link, spells = spells,
-                    }
+                    local procs, flats = {}, {}
+                    for j = 1, #spells do
+                        local id = spells[j]
+                        if ClassifySpell(id) == "flat" then
+                            flats[#flats + 1] = id
+                        else
+                            procs[#procs + 1] = id
+                        end
+                    end
+                    if #procs == 0 and db.hideFlat then
+                        flatHidden = flatHidden + 1
+                    else
+                        procCount = procCount + 1
+                        local link = ItemLink(row.e, row.rp)
+                        local dispName = GetItemInfo(link) or baseName
+                        matched[#matched + 1] = {
+                            e = row.e, rp = row.rp, count = row.count,
+                            q = row.q, ilvl = row.ilvl,
+                            name = dispName, link = link,
+                            procs = procs, flats = flats,
+                            spells = (#procs > 0) and procs or flats,
+                        }
+                    end
                 end
             end
         end
@@ -214,7 +292,17 @@ local function Request()
     SendAddonMessage(SEND_PREFIX, "VLTGET", "WHISPER", UnitName("player"))
 end
 
+local function StagingSig()
+    local sig, n = 0, 0
+    for _, row in pairs(staging) do
+        n = n + 1
+        sig = sig + row.e * 31 + (row.rp or 0) * 7 + (row.count or 1)
+    end
+    return sig * 100000 + n
+end
+
 local function CommitSnapshot(source)
+    lastSig = StagingSig()
     for k in pairs(vault) do vault[k] = nil end
     local n = 0
     for _, row in pairs(staging) do n = n + 1; vault[n] = row end
@@ -225,11 +313,9 @@ local function CommitSnapshot(source)
     Rebuild()
 end
 
---=================== UncappedVault global fallback ===================
--- If the live realm moves vault data through kirei's transport hooks
--- instead of UNC addon messages, the UncappedVault addon still holds
--- the goods in _G.UncappedVault.items. Its exact shape is not
--- guaranteed, so every plausible field spelling is probed.
+--=================== UncappedVault global read =======================
+-- The confirmed live data path: kirei's addon keeps its items table
+-- current through the realm's own transport; we read it directly.
 local FIELD_E  = { "e", "entry", "id", "itemId", "itemid", "item" }
 local FIELD_C  = { "count", "c", "n", "num", "stack", "stackCount" }
 local FIELD_RP = { "rp", "randomProp", "randomprop", "rand", "suffix", "suffixId" }
@@ -237,11 +323,10 @@ local FIELD_Q  = { "q", "quality", "rarity" }
 local FIELD_IL = { "ilvl", "itemLevel", "itemlevel", "level" }
 local FIELD_CL = { "class", "itemClass", "itemclass", "cls" }
 
-local function PickField(row, names, wantNumber)
+local function PickField(row, names)
     for i = 1, #names do
         local v = row[names[i]]
         if type(v) == "number" then return v end
-        if not wantNumber and type(v) == "string" then return v end
     end
 end
 
@@ -254,19 +339,18 @@ end
 
 local function AbsorbRow(row)
     if type(row) ~= "table" then return false end
-    local e = PickField(row, FIELD_E, true)
+    local e = PickField(row, FIELD_E)
     if not e then
-        -- entry may hide inside a link string
         e = EntryFrom(row.link or row.itemLink or row.itemlink)
     end
     if not e or e <= 0 then return false end
-    local rp = PickField(row, FIELD_RP, true) or 0
+    local rp = PickField(row, FIELD_RP) or 0
     staging[e .. ":" .. rp] = {
         e = e, rp = rp,
-        count = PickField(row, FIELD_C, true) or 1,
-        q = PickField(row, FIELD_Q, true),
-        ilvl = PickField(row, FIELD_IL, true),
-        class = PickField(row, FIELD_CL, true),
+        count = PickField(row, FIELD_C) or 1,
+        q = PickField(row, FIELD_Q),
+        ilvl = PickField(row, FIELD_IL),
+        class = PickField(row, FIELD_CL),
     }
     return true
 end
@@ -276,12 +360,10 @@ local function TryVaultGlobal()
     local src = UV and type(UV) == "table" and UV.items
     if type(src) ~= "table" then return false end
     local got = 0
-    -- array of row tables
     for i = 1, #src do
         if AbsorbRow(src[i]) then got = got + 1 end
     end
     if got == 0 then
-        -- keyed shapes: entry -> row table, or entry -> count
         for k, v in pairs(src) do
             if AbsorbRow(v) then
                 got = got + 1
@@ -295,6 +377,12 @@ local function TryVaultGlobal()
         end
     end
     if got > 0 then
+        -- unchanged data: skip the rebuild churn (2s polling)
+        if snapshotSeen and dataSource == "UncappedVault"
+            and StagingSig() == lastSig then
+            for k in pairs(staging) do staging[k] = nil end
+            return true
+        end
         CommitSnapshot("UncappedVault")
         return true
     end
@@ -305,8 +393,10 @@ end
 local function DumpVault()
     local UV = _G.UncappedVault
     Msg("dump: UncappedVault is " .. type(UV))
+    Msg("dump: remembered withdraw route: " .. tostring(db and db.wdRoute))
     if type(UV) ~= "table" then return end
-    Msg("dump: .items is " .. type(UV.items))
+    Msg("dump: .Withdraw is " .. type(UV.Withdraw) ..
+        ", .Send is " .. type(UV.Send) .. ", .items is " .. type(UV.items))
     if type(UV.items) ~= "table" then return end
     local total, firstRow, firstKey = 0, nil, nil
     for k, v in pairs(UV.items) do
@@ -330,16 +420,86 @@ local function DumpVault()
     end
 end
 
+--========================= withdraw cascade ==========================
+local function RowCount(e, rp)
+    for i = 1, #vault do
+        local r = vault[i]
+        if r.e == e and (r.rp or 0) == (rp or 0) then return r.count or 1 end
+    end
+    return 0
+end
+
+-- Fire the next plausible withdraw route. Every attempt is
+-- pcall-guarded and harmless if wrong; the verify step between routes
+-- guarantees at most one takes effect. Returns true if something was
+-- fired, false when the cascade is exhausted.
+local function FireWithdrawRoute(w)
+    local UV = _G.UncappedVault
+    local verb = format("VLTWD:%d:%d:%d", w.e, w.rp or 0, w.count)
+    while w.route < WD_MAX_ROUTE do
+        w.route = w.route + 1
+        local L = w.route
+        if L == 1 and UV and type(UV.Withdraw) == "function" then
+            if pcall(UV.Withdraw, w.e, w.rp or 0, w.count) then return true end
+        elseif L == 2 and UV and type(UV.Withdraw) == "function" then
+            if pcall(UV.Withdraw, UV, w.e, w.rp or 0, w.count) then return true end
+        elseif L == 3 and UV and type(UV.Send) == "function" then
+            if pcall(UV.Send, verb) then return true end
+        elseif L == 4 and UV and type(UV.Send) == "function" then
+            if pcall(UV.Send, UV, verb) then return true end
+        elseif L == 5 then
+            SendAddonMessage(SEND_PREFIX, verb, "WHISPER", UnitName("player"))
+            return true
+        end
+    end
+    return false
+end
+
+local function StartWithdraw(m, count)
+    if pendingWD then return end -- one at a time
+    wdFailed, wdDoneAt, wdDoneName = false, nil, nil
+    pendingWD = {
+        e = m.e, rp = m.rp or 0, count = count,
+        before = m.count or 1, name = m.name or "?",
+        -- start at the remembered good route, if any
+        route = (db.wdRoute and db.wdRoute - 1) or 0,
+        at = GetTime(),
+    }
+    if not FireWithdrawRoute(pendingWD) then
+        pendingWD = nil
+        wdFailed = true
+        db.wdRoute = nil
+    end
+    if RefreshList then RefreshList() end
+end
+
+local function CheckWithdraw(now)
+    if not pendingWD or now - pendingWD.at < WD_VERIFY_DELAY then return end
+    TryVaultGlobal()
+    local w = pendingWD
+    if RowCount(w.e, w.rp) < w.before then
+        db.wdRoute = w.route          -- remember what worked
+        wdDoneAt, wdDoneName = now, w.name
+        pendingWD = nil
+    elseif FireWithdrawRoute(w) then
+        w.at = now                    -- next route armed, verify again
+    else
+        pendingWD = nil               -- cascade exhausted
+        wdFailed = true
+        db.wdRoute = nil
+    end
+    if RefreshList then RefreshList() end
+end
+
 --========================= wire handler ==============================
 local comms = CreateFrame("Frame")
 comms:RegisterEvent("CHAT_MSG_ADDON")
-comms:SetScript("OnEvent", function(_, _, prefix, msg, chan, sender)
+comms:SetScript("OnEvent", function(_, _, prefix, msg)
     if wireDebug and msg then
         Msg("|cff888888[wire]|r " .. tostring(prefix) .. " " .. strsub(msg, 1, 70))
     end
     if prefix ~= RECV_PREFIX or not msg then return end
     if find(msg, "^VLTROW:") then
-        -- full 7-numeric-field rows (icon field skipped)
         local got = false
         for e, rp, c, q, cl, sub, il in gmatch(msg,
             "(%-?%d+),(%-?%d+),(%d+),(%-?%d+),(%-?%d+),(%-?%d+),(%-?%d+),[^;]*;") do
@@ -351,8 +511,6 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg, chan, sender)
             }
         end
         if not got then
-            -- tolerant fallback (proven VaultScan pattern): first three
-            -- fields only; equippable check falls back to GetItemInfo
             for e, rp, c in gmatch(msg, "(%-?%d+),(%-?%d+),(%d+),[^;]*;") do
                 staging[e .. ":" .. rp] = {
                     e = tonumber(e), rp = tonumber(rp), count = tonumber(c),
@@ -363,7 +521,6 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg, chan, sender)
         CommitSnapshot("wire")
     elseif find(msg, "^VLTUPD") or find(msg, "^VLTROWUPD")
         or find(msg, "^VLTWDONE") or find(msg, "^VLTDEPALLDONE") then
-        -- vault changed; re-pull (debounced) while the window is open
         dirtyAt = GetTime()
     end
 end)
@@ -376,9 +533,20 @@ ticker:SetScript("OnUpdate", function()
         Request()
     end
     if awaitingAt and now - awaitingAt >= WIRE_WATCHDOG then
-        -- the wire never answered: fall back to UncappedVault's own data
         awaitingAt = nil
         if not TryVaultGlobal() and RefreshList then RefreshList() end
+    end
+    -- live updates: the wire's VLTUPD never arrives on this realm, so
+    -- while the list is fed from the global, re-read it every 2s
+    if ui and ui:IsShown() and dataSource ~= "wire"
+        and now - pollAt >= POLL_INTERVAL then
+        pollAt = now
+        TryVaultGlobal()
+    end
+    CheckWithdraw(now)
+    if wdDoneAt and now - wdDoneAt > 5 then
+        wdDoneAt, wdDoneName = nil, nil
+        if RefreshList then RefreshList() end
     end
     if pendingN > 0 and now - primeAt >= PRIME_INTERVAL then
         primeAt = now
@@ -395,7 +563,6 @@ local function QualityHex(q)
 end
 
 local function ProcLines(spells)
-    -- unique by spell name; keep every id per name for the tooltip
     local seen, out = {}, {}
     for i = 1, #spells do
         local id = spells[i]
@@ -417,7 +584,7 @@ local function RowTooltip(row)
     GameTooltip:SetHyperlink(row.link)
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine("Procs (ProcHunter database):", 0.2, 1, 0.6)
-    local lines = ProcLines(row.spells)
+    local lines = ProcLines(row.procs)
     for i = 1, #lines do
         local l = lines[i]
         GameTooltip:AddLine("  " .. l.name .. " (" ..
@@ -428,6 +595,14 @@ local function RowTooltip(row)
                 0.6, 0.6, 0.6)
         end
     end
+    local fl = ProcLines(row.flats)
+    for i = 1, #fl do
+        GameTooltip:AddLine("  " .. fl[i].name .. " (passive stat)",
+            0.5, 0.5, 0.5)
+    end
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Right-click: withdraw to bags", 0.7, 0.7, 0.7)
+    GameTooltip:AddLine("Shift+Right-click: withdraw one", 0.7, 0.7, 0.7)
     GameTooltip:Show()
 end
 
@@ -468,7 +643,11 @@ local function BuildUI()
     refresh:SetWidth(70); refresh:SetHeight(20)
     refresh:SetPoint("TOPLEFT", 16, -34)
     refresh:SetText("Refresh")
-    refresh:SetScript("OnClick", function() lastRequest = 0; Request() end)
+    refresh:SetScript("OnClick", function()
+        lastRequest = 0
+        TryVaultGlobal()
+        Request()
+    end)
 
     local filterLabel = ui:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     filterLabel:SetPoint("LEFT", refresh, "RIGHT", 14, 0)
@@ -506,6 +685,7 @@ local function BuildUI()
         r:SetPoint("TOPLEFT", 18, -64 - (i - 1) * ROW_H)
         r:SetPoint("RIGHT", scroll, "RIGHT", -4, 0)
         r:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        r:RegisterForClicks("RightButtonUp")
 
         r.icon = r:CreateTexture(nil, "ARTWORK")
         r.icon:SetWidth(18); r.icon:SetHeight(18)
@@ -524,6 +704,12 @@ local function BuildUI()
         r.proc:SetPoint("RIGHT", -2, 0)
         r.proc:SetJustifyH("LEFT")
 
+        r:SetScript("OnClick", function(self, button)
+            if button == "RightButton" and self.data then
+                local m = self.data
+                StartWithdraw(m, IsShiftKeyDown() and 1 or (m.count or 1))
+            end
+        end)
         r:SetScript("OnEnter", function(self)
             if self.data then RowTooltip(self.data) end
         end)
@@ -541,7 +727,6 @@ end
 RefreshList = function()
     if not ui then return end
 
-    -- apply the text filter (item name or proc name)
     for k in pairs(shown) do shown[k] = nil end
     local q = lower(ui.filter:GetText() or "")
     for i = 1, #matched do
@@ -575,7 +760,8 @@ RefreshList = function()
             local lines = ProcLines(m.spells)
             local names = {}
             for j = 1, #lines do names[j] = lines[j].name end
-            r.proc:SetText("|cff33ff99" .. table.concat(names, ", ") .. "|r")
+            local color = (#m.procs > 0) and "|cff33ff99" or "|cff888888"
+            r.proc:SetText(color .. table.concat(names, ", ") .. "|r")
             r:Show()
         else
             r.data = nil
@@ -583,14 +769,23 @@ RefreshList = function()
         end
     end
 
-    local tail
+    local tail = ""
     if not snapshotSeen then
-        tail = awaitingAt and "  ·  |cff80ffffasking the server...|r"
-            or "  ·  |cffff8080no snapshot yet — Refresh (then /ph dump if still empty)|r"
+        tail = awaitingAt and "  ·  |cff80ffffreading vault...|r"
+            or "  ·  |cffff8080no vault data yet — Refresh (then /ph dump if still empty)|r"
     elseif dataSource == "UncappedVault" then
         tail = "  ·  source: UncappedVault"
-    else
-        tail = ""
+    end
+    if db.hideFlat and flatHidden > 0 then
+        tail = tail .. format("  ·  |cff888888%d flat-stat hidden|r", flatHidden)
+    end
+    if pendingWD then
+        tail = tail .. format("  ·  |cff80ffffwithdrawing %s (route %d/%d)...|r",
+            pendingWD.name, pendingWD.route, WD_MAX_ROUTE)
+    elseif wdDoneAt then
+        tail = tail .. format("  ·  |cff33ff33withdrawn: %s|r", wdDoneName or "")
+    elseif wdFailed then
+        tail = tail .. "  ·  |cffff8080withdraw refused or ignored — send me UncappedVault.lua to pin the route|r"
     end
     ui.status:SetText(format(
         "%d in vault  ·  %d equippable  ·  |cff33ff99%d with procs|r  ·  showing %d%s%s",
@@ -602,9 +797,6 @@ RefreshList = function()
 end
 
 --========================= minimap button ============================
--- Free-drag with exact x/y offsets saved (no rim snapping): radius
--- placement breaks on scaled minimaps. Canonical LibDBIcon texture
--- layout: 31px button, 53px border at TOPLEFT 0,0, 17px icon at 7,-6.
 local function PlaceMinimapButton()
     if not mmBtn then return end
     mmBtn:ClearAllPoints()
@@ -674,7 +866,7 @@ local function BuildOptions()
     d:SetPoint("RIGHT", -20, 0)
     d:SetJustifyH("LEFT")
     d:SetText("Scans your Uncapped Vault and lists every equippable item " ..
-        "that carries a proc. Read-only — it never touches your vault. " ..
+        "that carries a proc. Right-click a row to withdraw it. " ..
         "v" .. VERSION)
 
     local open = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
@@ -695,8 +887,19 @@ local function BuildOptions()
         end
     end)
 
+    local cf = CreateFrame("CheckButton", "ProcHunterFlatCheck", p,
+        "UICheckButtonTemplate")
+    cf:SetPoint("TOPLEFT", cb, "BOTTOMLEFT", 0, -6)
+    _G["ProcHunterFlatCheckText"]:SetText(
+        "Hide items whose only effect is a flat stat bonus (e.g. +24 Intellect)")
+    cf:SetChecked(db.hideFlat and true or false)
+    cf:SetScript("OnClick", function(self)
+        db.hideFlat = self:GetChecked() and true or false
+        Rebuild()
+    end)
+
     local h = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    h:SetPoint("TOPLEFT", cb, "BOTTOMLEFT", 4, -14)
+    h:SetPoint("TOPLEFT", cf, "BOTTOMLEFT", 4, -14)
     h:SetPoint("RIGHT", -20, 0)
     h:SetJustifyH("LEFT")
     h:SetText("Slash commands: |cffffd100/ph|r toggle window  ·  " ..
@@ -713,8 +916,9 @@ local function Toggle()
         ui:Hide()
     else
         ui:Show()
+        TryVaultGlobal()   -- instant fill from the confirmed data path
         RefreshList()
-        if not snapshotSeen or dirtyAt then Request() end
+        Request()          -- wire attempt underneath, in case it ever lives
     end
 end
 
@@ -742,6 +946,7 @@ init:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON then
         ProcHunterDB = ProcHunterDB or {}
         db = ProcHunterDB
+        if db.hideFlat == nil then db.hideFlat = true end
         BuildOptions()
     elseif event == "PLAYER_LOGIN" then
         BuildMinimapButton()
