@@ -1,6 +1,33 @@
 ProcHunter — Changelog
 ======================
 
+v1.5.0 (2026-09-11)
+-------------------
+EXTRACT FROM THE LIST — Ctrl+Right-click a row to learn one of its
+procs, end to end:
+
+- ProcHunter withdraws one copy, identifies the EXACT bag slot it
+  landed in (bag snapshot diff: only a slot that newly gained the
+  item can ever be destroyed — a pre-existing, possibly imprinted
+  copy is never touched), asks the extraction picker (ICEXSRC ->
+  ICEXI ... ICEXIEND) for the copy's exact spell and trigger, and
+  opens a NAMED CONSENT DIALOG.
+- The dialog lists the copy's procs; ones already unlocked are
+  greyed out, the first learnable one is pre-selected, and the
+  warning is explicit: "This DESTROYS the withdrawn copy. One proc
+  per copy." Extraction is free on this realm (Scrolls of Extraction
+  are retired) — nothing else is spent.
+- Confirm re-verifies the bag slot at the moment of truth (any drift
+  aborts with nothing destroyed) and sends ICUNLOCK. On the server's
+  ICUNLOCKED reply the proc joins your collection instantly and the
+  item's tick flips green live — Wardrobe unlocks made outside
+  ProcHunter are absorbed the same way.
+- Every stage has a timeout that aborts loudly with the item safe in
+  your bags; Cancel does the same. If every proc on the copy is
+  already unlocked, the confirm button is disabled and the copy
+  simply stays with you. One flow at a time; live progress in the
+  status line.
+
 v1.4.1 (2026-09-11)
 -------------------
 - The window (and the amount dialog) now uses a solid near-black
