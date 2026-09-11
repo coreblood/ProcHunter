@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.4.0 — Uncapped Vault proc scanner
+-- ProcHunter v1.4.1 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -37,7 +37,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.4.0"
+local VERSION = "1.4.1"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -564,11 +564,12 @@ local function ShowAmountDialog(m)
         amtDlg:SetPoint("CENTER")
         amtDlg:SetFrameStrata("DIALOG")
         amtDlg:SetBackdrop({
-            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            bgFile = "Interface\\Buttons\\WHITE8X8",
             edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-            tile = true, tileSize = 32, edgeSize = 32,
+            tile = false, edgeSize = 32,
             insets = { left = 8, right = 8, top = 8, bottom = 8 },
         })
+        amtDlg:SetBackdropColor(0.07, 0.07, 0.09, 1)
         amtDlg:EnableMouse(true)
 
         amtDlg.title = amtDlg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -833,11 +834,13 @@ local function BuildUI()
     ui:SetWidth(600); ui:SetHeight(430)
     ui:SetFrameStrata("HIGH")
     ui:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        bgFile = "Interface\\Buttons\\WHITE8X8", -- solid: the stock
+        -- parchment texture has transparency baked into the artwork
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true, tileSize = 32, edgeSize = 32,
+        tile = false, edgeSize = 32,
         insets = { left = 8, right = 8, top = 8, bottom = 8 },
     })
+    ui:SetBackdropColor(0.07, 0.07, 0.09, 1)
     ui:EnableMouse(true); ui:SetMovable(true)
     ui:RegisterForDrag("LeftButton")
     ui:SetScript("OnDragStart", function(self) self:StartMoving() end)
