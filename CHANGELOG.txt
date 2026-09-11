@@ -1,6 +1,34 @@
 ProcHunter — Changelog
 ======================
 
+v1.4.0 (2026-09-11)
+-------------------
+Built from the dissected server addon pack (uploaded 2026-09-11):
+
+- EXTRACTION TICKS: a green tick left of the item name when every
+  proc on the item is already in your unlocked collection; a dimmed
+  yellow tick when only some are. Judged per proc NAME, so owning any
+  rank of a proc counts that proc as unlocked. ProcHunter requests
+  the account collection itself (ICCOLL -> ICCOLLROW stream, still
+  ordinary addon messages) on open and Refresh (60s cooldown), and
+  absorbs Wardrobe streams triggered by other addons for free. The
+  row tooltip states it in words: all / N of M / none; the status
+  line shows "awaiting extraction data" until the first stream lands.
+- WITHDRAW PINNED: the dissected Core.Withdraw(itemRow, count) takes
+  the item's own row table and honors the count (sent as exact text
+  per kirei's own overflow note), so any amount is now ONE proper
+  call. The old guess-routes that could never work are deleted;
+  Core.Send with the raw verb and the raw wire send remain as
+  fallbacks, and the verify loop stays as a bag-space safety net with
+  honest "N of M (stopped)" reporting. Remembered route numbers from
+  older versions are reset once (schema migration).
+- Wire truth, for the record: same REAGENTBANK prefix, but vault
+  snapshot replies ride kirei's native pipe (the addon-message
+  fallback was removed server-side) — which is why the UNC listener
+  heard silence while UncappedVault.items stayed fresh. Our VLTGET
+  is still heard and nudges kirei's addon to refresh the very table
+  we read, so it stays.
+
 v1.3.1 (2026-09-11)
 -------------------
 Withdraw semantics INVERTED after v1.3.0's whole-stack default filled
