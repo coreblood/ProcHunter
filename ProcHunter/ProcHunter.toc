@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: ProcHunter
+## Notes: Scans your Uncapped Vault for equippable items that carry a proc.
+## Author: Mhortai
+## Version: 1.0.0
+## SavedVariables: ProcHunterDB
+
+ProcHunter_ProcDB.lua
+ProcHunter_DropDB.lua
+ProcHunter.lua
