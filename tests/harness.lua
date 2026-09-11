@@ -35,7 +35,8 @@ end
 function GetItemIcon() return "tex" end
 
 local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
-    [888] = "Enrage", [999] = "Increase Intellect 24" }
+    [888] = "Enrage", [999] = "Increase Intellect 24",
+    [777] = "Crit Aura" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
@@ -44,6 +45,7 @@ local spellTips = {
     [101] = { "Frost Bite", "Chance on hit: Blasts the enemy for 100 Frost damage." },
     [999] = { "Increase Intellect 24", "Increases Intellect by 24." },
     [888] = { "Enrage", "Increases your attack power by 300 for 30 sec." },
+    [777] = { "Crit Aura", "Improves critical strike damage by 3.15%." },
 }
 
 ITEM_QUALITY_COLORS = {}
@@ -51,11 +53,12 @@ for i = 0, 7 do ITEM_QUALITY_COLORS[i] = { hex = "|cffffffff" } end
 UISpecialFrames = {}
 SlashCmdList = {}
 tinsert = table.insert
-FauxScrollFrame_Update = function() end
+FauxScrollFrame_Update = function(_, total, vis) lastVis = vis end
 FauxScrollFrame_GetOffset = function() return 0 end
 FauxScrollFrame_OnVerticalScroll = function() end
 
 local lastStatus = ""
+lastVis = nil
 local function NewRegion(kind)
     local o = { _kind = kind, _text = "" }
     o.SetText = function(self, t)
@@ -63,6 +66,7 @@ local function NewRegion(kind)
         if type(t) == "string" and t:find("in vault") then lastStatus = t end
     end
     o.GetText = function(self) return self._text end
+    o.SetFont = function(self, p, sz) self._font = p; self._fsize = sz end
     setmetatable(o, { __index = function(_, k)
         if type(k) == "string" and k:match("^[A-Z]") then return function() end end
     end })
@@ -86,6 +90,17 @@ function CreateFrame(ftype, name, parent, template)
     f.SetText = function(self, t) self._text = t end
     f.SetChecked = function(self, v) self._checked = not not v end
     f.GetChecked = function(self) return self._checked end
+    f.SetAlpha = function(self, a) self._alpha = a end
+    f.SetWidth = function(self, w) self._w = w end
+    f.SetHeight = function(self, h) self._h = h end
+    f.GetWidth = function(self) return self._w end
+    f.GetHeight = function(self) return self._h end
+    f.SetValue = function(self, v)
+        self._value = v
+        local fn = self._scripts["OnValueChanged"]
+        if fn then fn(self, v) end
+    end
+    f.GetValue = function(self) return self._value end
     if ftype == "GameTooltip" and name then
         f._lines = {}
         f.ClearLines = function(self) self._lines = {} end
@@ -107,6 +122,11 @@ function CreateFrame(ftype, name, parent, template)
     if template == "UICheckButtonTemplate" and name then
         _G[name .. "Text"] = NewRegion("fs")
     end
+    if template == "OptionsSliderTemplate" and name then
+        _G[name .. "Text"] = NewRegion("fs")
+        _G[name .. "Low"] = NewRegion("fs")
+        _G[name .. "High"] = NewRegion("fs")
+    end
     frames[#frames + 1] = f
     return f
 end
@@ -123,6 +143,7 @@ ProcHunter_ProcDB = {
     [300] = "Mystery Maul",                  -- proc on an uncached item (empty tip)
     [888] = "Berserker Blade",               -- duration buff => real proc
     [999] = "Eagle Cuirass",                 -- flat stat only => hidden
+    [777] = "Crit Cloak",                    -- PERCENT bonus => visible
 }
 ProcHunter_ProcDB_Manual = { [400] = "Override Ring" }
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
@@ -238,6 +259,46 @@ ok(mm._shown == false, "unticking hides minimap button")
 cb:SetChecked(true); cb._scripts["OnClick"](cb)
 ok(mm._shown == true, "ticking shows minimap button")
 
+--==================== look options: opacity, font size, font ====================
+local ops = _G["ProcHunterOpacitySlider"]
+ok(ops ~= nil, "opacity slider exists")
+ops:SetValue(50)
+ok(win._alpha == 0.5, "opacity 50 -> alpha 0.5 (got " .. tostring(win._alpha) .. ")")
+local fss = _G["ProcHunterFontSizeSlider"]
+ok(fss ~= nil, "font size slider exists")
+fss:SetValue(14)
+local anyRow
+for _, f in ipairs(frames) do
+    if f.ilvl and f.name and f.proc then anyRow = f end
+end
+ok(anyRow and anyRow.name._fsize == 14, "font size applied to rows")
+local fontBtn
+for _, f in ipairs(frames) do
+    if f._type == "Button" and type(f._text) == "string"
+        and f._text:find("^Font: ") then fontBtn = f end
+end
+ok(fontBtn ~= nil, "font cycle button exists")
+fontBtn._scripts["OnClick"](fontBtn)
+ok(fontBtn._text == "Font: Arial Narrow", "font cycles to Arial Narrow")
+ok(anyRow.name._font and anyRow.name._font:find("ARIALN") ~= nil,
+    "row font path switched")
+
+--==================== resizable: row count follows height ====================
+win._h = 300; win._scripts["OnSizeChanged"](win)
+local visSmall = lastVis
+win._h = 430; win._scripts["OnSizeChanged"](win)
+ok(visSmall and lastVis and visSmall < lastVis,
+    "shorter window shows fewer rows (" .. tostring(visSmall) .. " < " .. tostring(lastVis) .. ")")
+
+--==================== percent bonuses stay visible ====================
+items[1009] = { name = "Crit Cloak", q = 3, ilvl = 120 }
+feed("VLTROW:1007,0,1,2,4,1,100,icon;1009,0,1,3,4,1,120,icon;")
+feed("VLTEND:")
+ok(lastStatus:find("1 with procs") ~= nil,
+    "percent-bonus cloak visible: " .. lastStatus)
+ok(lastStatus:find("1 flat%-stat hidden") ~= nil,
+    "plain flat cuirass still hidden: " .. lastStatus)
+
 --==================== instant global read on open ====================
 SlashCmdList["PROCHUNTER"]()  -- close
 UncappedVault = { items = {
@@ -301,6 +362,50 @@ ok(#sent == before + 1 and sent[#sent].msg:find("^VLTWD:1001:0:2") ~= nil,
 clock = clock + 1.6; tick()
 ok(lastStatus:find("refused or ignored") ~= nil, "failure surfaced: " .. lastStatus)
 ok(ProcHunterDB.wdRoute == nil, "remembered route cleared on failure")
+
+--==================== one-per-call route: target loop drains the stack ====================
+UncappedVault.Withdraw = function(e, rp, c)  -- live behavior: ignores count
+    for i = #UncappedVault.items, 1, -1 do
+        local r = UncappedVault.items[i]
+        if r.itemId == e then
+            r.stackCount = (r.stackCount or 1) - 1
+            if r.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+            return
+        end
+    end
+end
+local stack2 = RowFor(1001)
+ok(stack2 and stack2.data.count == 2, "stack x2 present for loop test")
+stack2._scripts["OnClick"](stack2, "RightButton")
+clock = clock + 1.6; tick()
+ok(lastStatus:find("withdrawing") ~= nil and lastStatus:find("1/2") ~= nil,
+    "one copy moved, loop continuing: " .. lastStatus)
+clock = clock + 1.0; tick()
+ok(lastStatus:find("withdrawn: ") ~= nil and lastStatus:find("x2") ~= nil,
+    "loop drained the full stack: " .. lastStatus)
+ok(RowFor(1001) == nil, "stack row gone after full drain")
+ok(ProcHunterDB.wdRoute == 1, "route re-remembered by the loop")
+
+--==================== one-per-call: partial stop reports N of M ====================
+UncappedVault.items[#UncappedVault.items + 1] =
+    { itemId = 1006, stackCount = 4, suffixId = -13 }
+local budget = 2
+local realWithdraw = UncappedVault.Withdraw
+UncappedVault.Withdraw = function(e, rp, c)
+    if budget <= 0 then return end -- bags full: server silently refuses
+    budget = budget - 1
+    realWithdraw(e, rp, c)
+end
+clock = clock + 2.1; tick() -- poll absorbs the new row
+local ring = RowFor(1006)
+ok(ring and ring.data.count == 4, "ring x4 present for partial test")
+ring._scripts["OnClick"](ring, "RightButton")
+clock = clock + 1.6; tick()
+clock = clock + 1.0; tick()
+clock = clock + 1.0; tick()
+ok(lastStatus:find("2 of 4") ~= nil and lastStatus:find("stopped") ~= nil,
+    "partial withdrawal reported honestly: " .. lastStatus)
+ok(RowFor(1006) and RowFor(1006).data.count == 2, "ring stack reduced 4 -> 2")
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
