@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.3.0 — Uncapped Vault proc scanner
+-- ProcHunter v1.3.1 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -33,7 +33,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.3.0"
+local VERSION = "1.3.1"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -95,6 +95,7 @@ local wdFailed     = false
 local visRows      = 14     -- rows that fit the current window height
 local ROWH         = 22     -- current row height (depends on font size)
 local ApplyLook             -- forward: applies font/size/alpha + relayout
+local amtDlg                -- withdraw-amount dialog (lazy)
 
 --========================= small helpers =============================
 local function Msg(text)
@@ -500,6 +501,89 @@ local function StartWithdraw(m, count)
     if RefreshList then RefreshList() end
 end
 
+-- Shift+Right-click: ask for an amount. Right-click alone withdraws
+-- exactly ONE — on a vault with 17k-item stacks, bulk must never
+-- happen by accident (learned the hard way in v1.3.0).
+local function ShowAmountDialog(m)
+    if pendingWD then return end
+    if not amtDlg then
+        amtDlg = CreateFrame("Frame", "ProcHunterAmountDialog", UIParent)
+        amtDlg:SetWidth(260); amtDlg:SetHeight(120)
+        amtDlg:SetPoint("CENTER")
+        amtDlg:SetFrameStrata("DIALOG")
+        amtDlg:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true, tileSize = 32, edgeSize = 32,
+            insets = { left = 8, right = 8, top = 8, bottom = 8 },
+        })
+        amtDlg:EnableMouse(true)
+
+        amtDlg.title = amtDlg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        amtDlg.title:SetPoint("TOP", 0, -16)
+        amtDlg.title:SetPoint("LEFT", 12, 0)
+        amtDlg.title:SetPoint("RIGHT", -12, 0)
+
+        amtDlg.have = amtDlg:CreateFontString(nil, "OVERLAY",
+            "GameFontHighlightSmall")
+        amtDlg.have:SetPoint("TOP", amtDlg.title, "BOTTOM", 0, -4)
+
+        amtDlg.edit = CreateFrame("EditBox", "ProcHunterAmountEdit", amtDlg,
+            "InputBoxTemplate")
+        amtDlg.edit:SetWidth(80); amtDlg.edit:SetHeight(20)
+        amtDlg.edit:SetPoint("TOP", amtDlg.have, "BOTTOM", 0, -8)
+        amtDlg.edit:SetNumeric(1)
+        amtDlg.edit:SetMaxLetters(6)
+        amtDlg.edit:SetAutoFocus(true)
+
+        local function Accept()
+            local it = amtDlg.item
+            local n = tonumber(amtDlg.edit:GetText() or "")
+            amtDlg:Hide()
+            if not it then return end
+            -- re-resolve the row: the list is live and may have moved
+            local fresh
+            for i = 1, #matched do
+                if matched[i].e == it.e
+                    and (matched[i].rp or 0) == (it.rp or 0) then
+                    fresh = matched[i]; break
+                end
+            end
+            if not fresh then return end -- left the vault meanwhile
+            n = floor(n or 1)
+            if n < 1 then n = 1 end
+            local cap = fresh.count or 1
+            if n > cap then n = cap end
+            StartWithdraw(fresh, n)
+        end
+
+        amtDlg.okBtn = CreateFrame("Button", nil, amtDlg,
+            "UIPanelButtonTemplate")
+        amtDlg.okBtn:SetWidth(100); amtDlg.okBtn:SetHeight(22)
+        amtDlg.okBtn:SetPoint("BOTTOMLEFT", 16, 14)
+        amtDlg.okBtn:SetText("Withdraw")
+        amtDlg.okBtn:SetScript("OnClick", Accept)
+
+        amtDlg.cancelBtn = CreateFrame("Button", nil, amtDlg,
+            "UIPanelButtonTemplate")
+        amtDlg.cancelBtn:SetWidth(100); amtDlg.cancelBtn:SetHeight(22)
+        amtDlg.cancelBtn:SetPoint("BOTTOMRIGHT", -16, 14)
+        amtDlg.cancelBtn:SetText("Cancel")
+        amtDlg.cancelBtn:SetScript("OnClick", function() amtDlg:Hide() end)
+
+        amtDlg.edit:SetScript("OnEnterPressed", Accept)
+        amtDlg.edit:SetScript("OnEscapePressed", function() amtDlg:Hide() end)
+
+        amtDlg:Hide() -- shown-by-default rule
+    end
+    amtDlg.item = m
+    amtDlg.title:SetText("Withdraw: " .. (m.name or "?"))
+    amtDlg.have:SetText(format("in vault: %d", m.count or 1))
+    amtDlg.edit:SetText("1")
+    amtDlg.edit:HighlightText()
+    amtDlg:Show()
+end
+
 local function CheckWithdraw(now)
     if not pendingWD then return end
     local w = pendingWD
@@ -664,8 +748,8 @@ local function RowTooltip(row)
             0.5, 0.5, 0.5)
     end
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine("Right-click: withdraw to bags", 0.7, 0.7, 0.7)
-    GameTooltip:AddLine("Shift+Right-click: withdraw one", 0.7, 0.7, 0.7)
+    GameTooltip:AddLine("Right-click: withdraw ONE to bags", 0.7, 0.7, 0.7)
+    GameTooltip:AddLine("Shift+Right-click: withdraw an amount...", 0.7, 0.7, 0.7)
     GameTooltip:Show()
 end
 
@@ -770,8 +854,11 @@ local function BuildUI()
 
         r:SetScript("OnClick", function(self, button)
             if button == "RightButton" and self.data then
-                local m = self.data
-                StartWithdraw(m, IsShiftKeyDown() and 1 or (m.count or 1))
+                if IsShiftKeyDown() then
+                    ShowAmountDialog(self.data)
+                else
+                    StartWithdraw(self.data, 1) -- one, always
+                end
             end
         end)
         r:SetScript("OnEnter", function(self)
@@ -998,7 +1085,7 @@ local function BuildOptions()
     d:SetPoint("RIGHT", -20, 0)
     d:SetJustifyH("LEFT")
     d:SetText("Scans your Uncapped Vault and lists every equippable item " ..
-        "that carries a proc. Right-click a row to withdraw it. " ..
+        "that carries a proc. Right-click withdraws one; Shift+Right-click asks for an amount. " ..
         "v" .. VERSION)
 
     local open = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
