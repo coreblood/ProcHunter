@@ -598,10 +598,57 @@ local ringTick2 = RowFor(1006) and RowFor(1006).tick
 ok(ringTick2 and ringTick2._shown == true and ringTick2._vg == 1,
     "absorbed external unlock turned the ring tick green live")
 
+--==================== extract flow: live ICINV dialect ====================
+-- the live realm never speaks ICEXI; it answers ICINV with
+-- ICITEM:B headers + ICIPROC rows, closed by ICINVEND
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade3 = RowFor(1008)
+ok(blade3 ~= nil, "blade back for ICINV dialect test")
+ctrlDown = true
+blade3._scripts["OnClick"](blade3, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local sawInv = false
+for i = 1, #sent do if sent[i].msg == "ICINV" then sawInv = true end end
+ok(sawInv, "ICINV requested alongside ICEXSRC")
+local bSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1008 then bSlot = slot end
+end
+ok(bSlot ~= nil, "blade copy landed for ICINV test")
+-- noise before our header: wrong slot, equipped gear, stray rows
+feed("ICITEM:B:4:19")
+feed("ICIPROC:999:1:50:0")            -- wrong item: must be ignored
+feed("ICITEM:E:0:1")                  -- equipped header: gate closes
+feed("ICIPROC:998:1:10:0")            -- still ignored
+-- our pinned copy
+feed("ICITEM:B:0:" .. bSlot)
+feed("ICIPROC:888:2:15:0")            -- the real proc
+feed("ICIPROCBP:777")                 -- prefix noise: no colon match
+feed("ICISTAT:1:2:3")                 -- stat noise
+feed("ICEXI:0:" .. bSlot .. ":1008:0:888:2") -- dual-answer realm: same proc twice
+feed("ICINVEND")
+local exd2 = _G["ProcHunterExtractDialog"]
+ok(exd2._shown == true, "consent dialog opened on ICINVEND")
+local nrows = 0
+for i = 1, 6 do
+    if exd2.rows[i] and exd2.rows[i].row then nrows = nrows + 1 end
+end
+ok(nrows == 1, "one deduped proc row (got " .. nrows .. ")")
+ok(exd2.rows[1].row.spell == 888 and exd2.rows[1].row.trigger == 2,
+    "ICIPROC spell/trigger parsed")
+exd2.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg == ("ICUNLOCK:0:" .. bSlot .. ":888:2"),
+    "ICUNLOCK unchanged downstream of the ICINV dialect")
+feed("ICUNLOCKED:888:2")
+ok(lastStatus:find("unlocked") ~= nil, "ICINV path completes: " .. lastStatus)
+
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
     ok(sent[i].msg == "VLTGET" or sent[i].msg == "ICCOLL"
-        or sent[i].msg == "ICEXSRC"
+        or sent[i].msg == "ICEXSRC" or sent[i].msg == "ICINV"
         or sent[i].msg:find("^VLTWD:") ~= nil
         or sent[i].msg:find("^ICUNLOCK:") ~= nil,
         "wire send #" .. i .. " is a known verb")
