@@ -1,6 +1,31 @@
 ProcHunter — Changelog
 ======================
 
+v1.1.0 (2026-09-11)
+-------------------
+- FIX: the first /ph after login was silently eaten — 3.3.5a frames are
+  shown by default, so the lazily built window was created "shown" and
+  the first toggle immediately hid it. The window now hides itself at
+  the end of its build; the first press opens it.
+- Minimap button (spyglass): click opens/closes the window, drag moves
+  it anywhere — exact x/y offsets are saved, no rim snapping (radius
+  placement breaks on scaled minimaps).
+- Interface Options panel (Interface -> AddOns -> ProcHunter): an Open
+  ProcHunter button, a Show minimap button tickbox, and a slash-command
+  reference.
+- UncappedVault fallback: if the server does not answer VLTGET within
+  5 seconds, ProcHunter reads the UncappedVault addon's own items table
+  directly (field names probed tolerantly; array, keyed-row and
+  entry->count shapes all understood). The status line shows
+  "source: UncappedVault" when this path fed the list. A wire snapshot,
+  when one arrives, always takes over again.
+- /ph debug — toggles printing of ALL addon wire traffic (any prefix)
+  to chat, for diagnosing server behavior without /run scripts. A
+  deliberate, opt-in exception to the no-chat-output rule.
+- /ph dump — prints what _G.UncappedVault looks like (types, entry
+  count, the first row's fields), so a failed fallback can be matched
+  to reality from a screenshot.
+
 v1.0.0 (2026-09-11)
 -------------------
 Initial release.
