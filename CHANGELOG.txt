@@ -1,6 +1,27 @@
 ProcHunter — Changelog
 ======================
 
+v1.5.2 (2026-09-11)
+-------------------
+EXTRACTION RACE FIX — the real reason Ctrl+Right-click still looked
+like a plain withdraw: the live realm PUSHES the ICINV proc stream
+the instant the withdrawn copy lands, BEFORE the bag diff has pinned
+the slot. v1.5.1 only listened during the locate stage, so the push
+was dropped and the late request went unanswered.
+
+- The stream (both dialects) is now cached for the whole life of the
+  flow, bucketed per bag:slot. Once the slot is pinned, a cache hit
+  opens the consent dialog instantly — no request needed at all.
+- Cache miss still sends ICEXSRC + ICINV as before (old-pack realms).
+- An END line arriving during the withdraw stage closes the cache and
+  never aborts. A locate timeout salvages cached rows if the END line
+  itself got lost.
+- Version is now visible: window title, login message, and /ph dump
+  all say the real version (v1.5.1 wrongly announced itself as
+  v1.5.0 at login — the stamp was missed; the .toc was correct).
+
+/reload suffices.
+
 v1.5.1 (2026-09-11)
 -------------------
 LIVE-REALM EXTRACTION FIX — Ctrl+Right-click looked like a plain
