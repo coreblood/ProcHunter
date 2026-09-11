@@ -1,6 +1,25 @@
 ProcHunter — Changelog
 ======================
 
+v1.5.1 (2026-09-11)
+-------------------
+LIVE-REALM EXTRACTION FIX — Ctrl+Right-click looked like a plain
+withdraw because the live realm never answers ICEXSRC; it speaks a
+different wire dialect for bag proc queries.
+
+- The locate stage now asks in BOTH dialects: ICEXSRC (old pack) and
+  ICINV (live realm).
+- The parser understands both replies: classic ICEXI rows, and the
+  live realm's ICITEM:B:<bag>:<slot> headers followed by
+  ICIPROC:<spell>:<trigger> rows, closed by ICINVEND. Only rows under
+  the header of YOUR pinned bag slot are read; equipped-gear headers
+  and other slots are ignored, as is ICIPROCBP/FACT/SRC/STAT noise.
+- If a realm ever answers both dialects, duplicate procs are deduped.
+- Everything downstream is untouched: consent dialog, slot
+  re-verification at confirm, ICUNLOCK, live tick flip.
+
+/reload suffices.
+
 v1.5.0 (2026-09-11)
 -------------------
 EXTRACT FROM THE LIST — Ctrl+Right-click a row to learn one of its
