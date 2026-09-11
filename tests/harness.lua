@@ -32,6 +32,9 @@ function GetItemIcon() return "tex" end
 local spells = { [100] = "Frost Bite", [101] = "Frost Bite", [200] = "Holy Nova" }
 function GetSpellInfo(id) return spells[id] end
 
+strsub = string.sub
+local optCategories = {}
+function InterfaceOptions_AddCategory(p) optCategories[#optCategories+1] = p end
 ITEM_QUALITY_COLORS = {}
 for i = 0, 7 do ITEM_QUALITY_COLORS[i] = { hex = "|cffffffff" } end
 UISpecialFrames = {}
@@ -57,8 +60,8 @@ end
 
 local frames = {}
 function CreateFrame(ftype, name, parent, template)
-    local f = { _type = ftype, _name = name, _shown = false,
-        _scripts = {}, _events = {} }
+    local f = { _type = ftype, _name = name, _shown = true,
+        _scripts = {}, _events = {}, _checked = false }
     f.RegisterEvent = function(self, ev) self._events[ev] = true end
     f.SetScript = function(self, h, fn) self._scripts[h] = fn end
     f.GetScript = function(self, h) return self._scripts[h] end
@@ -72,13 +75,21 @@ function CreateFrame(ftype, name, parent, template)
     f.SetText = function(self, t) self._text = t end
     f.ClearLines = function() end
     f.SetHyperlink = function() end
+    f.SetChecked = function(self, v) self._checked = not not v end
+    f.GetChecked = function(self) return self._checked end
     setmetatable(f, { __index = function(_, k)
         if type(k) == "string" and k:match("^[A-Z]") then return function() end end
     end })
+    if name then _G[name] = f end
+    if template == "UICheckButtonTemplate" and name then
+        _G[name .. "Text"] = NewRegion("fs")
+    end
     frames[#frames + 1] = f
     return f
 end
 UIParent = CreateFrame("Frame")
+Minimap = CreateFrame("Minimap", "Minimap")
+Minimap.GetCenter = function() return 100, 100 end
 GameTooltip = CreateFrame("GameTooltip")
 
 --==================== synthetic databases ====================
@@ -201,6 +212,82 @@ ok(lastStatus:find("showing 1") ~= nil, "proc-name filter path works: " .. lastS
 for i = 1, #sent do
     ok(sent[i].msg == "VLTGET", "wire send #" .. i .. " is VLTGET only")
 end
+
+--==================== v1.1.0: window visible on FIRST toggle ====================
+local win = _G["ProcHunterFrame"]
+ok(win and win._shown == true, "window is shown after the toggles so far")
+SlashCmdList["PROCHUNTER"]("")   -- close
+ok(win._shown == false, "toggle closes")
+SlashCmdList["PROCHUNTER"]("")   -- open again
+ok(win._shown == true, "toggle reopens (v1.0.0 eaten-press regression)")
+
+--==================== minimap button + options panel ====================
+local mm = _G["ProcHunterMinimapButton"]
+ok(mm ~= nil, "minimap button exists after PLAYER_LOGIN")
+mm._scripts["OnClick"]()
+ok(win._shown == false, "minimap click toggles window closed")
+mm._scripts["OnClick"]()
+ok(win._shown == true, "minimap click toggles window open")
+
+ok(#optCategories == 1 and optCategories[1].name == "ProcHunter",
+    "options panel registered")
+local cb = _G["ProcHunterMMCheck"]
+ok(cb ~= nil, "minimap checkbox exists")
+cb:SetChecked(false); cb._scripts["OnClick"](cb)
+ok(mm._shown == false, "unticking hides minimap button")
+cb:SetChecked(true); cb._scripts["OnClick"](cb)
+ok(mm._shown == true, "ticking shows minimap button")
+
+--==================== watchdog -> UncappedVault fallback ====================
+-- array shape with unfamiliar field names
+UncappedVault = { items = {
+    { itemId = 1001, stackCount = 2, suffixId = 0, rarity = 4, itemLevel = 200 },
+    { itemId = 1003, stackCount = 1 },   -- bag by equipLoc: excluded
+} }
+items[1003].equipLoc = "INVTYPE_BAG"
+local refreshBtn
+for _, f in ipairs(frames) do
+    if f._type == "Button" and f._text == "Refresh" then refreshBtn = f end
+end
+ok(refreshBtn ~= nil, "refresh button found")
+local sentBefore = #sent
+refreshBtn._scripts["OnClick"]()
+ok(#sent == sentBefore + 1, "refresh sends VLTGET")
+clock = clock + 6
+ticker._scripts["OnUpdate"](ticker)
+ok(lastStatus:find("2 in vault") ~= nil, "fallback array shape absorbed: " .. lastStatus)
+ok(lastStatus:find("1 equippable") ~= nil, "bag excluded via equipLoc: " .. lastStatus)
+ok(lastStatus:find("1 with procs") ~= nil, "blade matched from fallback: " .. lastStatus)
+ok(lastStatus:find("source: UncappedVault") ~= nil, "source tag shown: " .. lastStatus)
+
+-- keyed entry -> count shape
+UncappedVault.items = { [1001] = 3 }
+refreshBtn._scripts["OnClick"]()
+clock = clock + 6
+ticker._scripts["OnUpdate"](ticker)
+ok(lastStatus:find("1 in vault") and lastStatus:find("1 with procs"),
+    "fallback map shape absorbed: " .. lastStatus)
+
+-- wire recovery clears the source tag
+feed("VLTROW:1001,0,1,4,2,7,200,icon;")
+feed("VLTEND:")
+ok(lastStatus:find("source: UncappedVault") == nil,
+    "wire snapshot clears fallback tag: " .. lastStatus)
+
+--==================== /ph debug and /ph dump ====================
+local chatBefore = #chat
+SlashCmdList["PROCHUNTER"]("debug")
+ok(#chat == chatBefore + 1 and chat[#chat]:find("debug"), "debug toggle announces")
+comms._scripts["OnEvent"](comms, "CHAT_MSG_ADDON", "XYZ", "hello-wire")
+ok(chat[#chat]:find("%[wire%]") and chat[#chat]:find("XYZ"),
+    "debug prints foreign-prefix traffic")
+SlashCmdList["PROCHUNTER"]("debug")
+comms._scripts["OnEvent"](comms, "CHAT_MSG_ADDON", "XYZ", "quiet-now")
+ok(not chat[#chat]:find("quiet%-now"), "debug off is silent")
+chatBefore = #chat
+SlashCmdList["PROCHUNTER"](" dump ")
+ok(#chat > chatBefore and chat[chatBefore + 1]:find("dump:"), "dump prints shape info")
+ok(win._shown == true, "debug/dump args do not toggle the window")
 
 print(string.format("%d/%d tests passed", P, T))
 if P ~= T then os.exit(1) end
