@@ -1,6 +1,37 @@
 ProcHunter — Changelog
 ======================
 
+v1.2.0 (2026-09-11)
+-------------------
+- Right-click a row to WITHDRAW the item to your bags (whole stack);
+  Shift+Right-click withdraws exactly one. Because the working call
+  into the realm's vault addon is not yet pinned down, withdrawal is a
+  verified cascade: each plausible route (UncappedVault.Withdraw and
+  .Send in both call styles, then the raw VLTWD wire verb) is tried in
+  turn, the vault is re-read 1.5s after each, and the next route fires
+  only if the item did not move — at most one route can ever take
+  effect. The first route that works is remembered and used directly
+  from then on. One withdrawal at a time; progress, success and
+  failure all show in the status line.
+- Hide flat-stat-only items (option, DEFAULT ON): items whose only
+  matched effects are passive flat bonuses ("+24 Intellect",
+  "Increases X by N" with no duration) are hidden. Each candidate
+  spell's own tooltip is scanned once, client-side and instant; any
+  unrecognised or duration-bearing text ("...for 30 sec") classifies
+  as a real proc, so uncertainty always keeps an item visible. Mixed
+  items stay listed showing their real procs; passive stats appear
+  greyed in the row tooltip. The status line counts what was hidden.
+- Instant open: the list now fills from UncappedVault's data the
+  moment the window opens — no more ~6 second watchdog wait. VLTGET
+  is still sent underneath; a wire snapshot always takes over if the
+  realm ever starts answering.
+- Live updates: while fed from UncappedVault, the list re-reads the
+  data every 2 seconds while the window is open (change-detected, so
+  no churn), so deposits and withdrawals show up on their own —
+  including ProcHunter's own withdrawals.
+- /ph dump now also reports the remembered withdraw route and the
+  types of UncappedVault.Withdraw / .Send.
+
 v1.1.0 (2026-09-11)
 -------------------
 - FIX: the first /ph after login was silently eaten — 3.3.5a frames are
