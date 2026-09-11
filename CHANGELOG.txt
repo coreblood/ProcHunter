@@ -1,6 +1,13 @@
 ProcHunter — Changelog
 ======================
 
+v1.4.1 (2026-09-11)
+-------------------
+- The window (and the amount dialog) now uses a solid near-black
+  fill: the stock dialog parchment texture has transparency baked
+  into the artwork, so the world bled through even at 100% opacity.
+  The opacity slider works as before — 100% is now actually opaque.
+
 v1.4.0 (2026-09-11)
 -------------------
 Built from the dissected server addon pack (uploaded 2026-09-11):
