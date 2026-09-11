@@ -36,7 +36,7 @@ function GetItemIcon() return "tex" end
 
 local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [888] = "Enrage", [999] = "Increase Intellect 24",
-    [777] = "Crit Aura" }
+    [777] = "Crit Aura", [555] = "Fire Burst", [556] = "Ice Burst" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
@@ -46,6 +46,8 @@ local spellTips = {
     [999] = { "Increase Intellect 24", "Increases Intellect by 24." },
     [888] = { "Enrage", "Increases your attack power by 300 for 30 sec." },
     [777] = { "Crit Aura", "Improves critical strike damage by 3.15%." },
+    [555] = { "Fire Burst", "Chance on hit: fire." },
+    [556] = { "Ice Burst", "Chance on hit: ice." },
 }
 
 ITEM_QUALITY_COLORS = {}
@@ -67,6 +69,10 @@ local function NewRegion(kind)
     end
     o.GetText = function(self) return self._text end
     o.SetFont = function(self, p, sz) self._font = p; self._fsize = sz end
+    o.SetTexture = function(self, t) self._tex = t end
+    o.SetVertexColor = function(self, r, g, b) self._vr, self._vg, self._vb = r, g, b end
+    o.Show = function(self) self._shown = true end
+    o.Hide = function(self) self._shown = false end
     setmetatable(o, { __index = function(_, k)
         if type(k) == "string" and k:match("^[A-Z]") then return function() end end
     end })
@@ -144,6 +150,8 @@ ProcHunter_ProcDB = {
     [888] = "Berserker Blade",               -- duration buff => real proc
     [999] = "Eagle Cuirass",                 -- flat stat only => hidden
     [777] = "Crit Cloak",                    -- PERCENT bonus => visible
+    [555] = "Dual Axe",                      -- two distinct proc names
+    [556] = "Dual Axe",
 }
 ProcHunter_ProcDB_Manual = { [400] = "Override Ring" }
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
@@ -161,7 +169,10 @@ for _, f in ipairs(frames) do
 end
 ok(comms and init and ticker, "core frames located")
 
+ProcHunterDB = { wdRoute = 3 }  -- stale route number from the old cascade
 init._scripts["OnEvent"](init, "ADDON_LOADED", "ProcHunter")
+ok(ProcHunterDB.wdRoute == nil and ProcHunterDB.wdSchema == 2,
+    "old remembered route wiped by schema migration")
 init._scripts["OnEvent"](init, "PLAYER_LOGIN")
 ok(#chat == 1 and chat[1]:find("ProcHunter"), "exactly one login stamp")
 
@@ -184,7 +195,8 @@ feed("VLTEND:")
 SlashCmdList["PROCHUNTER"]()
 local win = _G["ProcHunterFrame"]
 ok(win._shown == true, "window visible on the FIRST toggle (v1.0.0 regression)")
-ok(#sent == 1 and sent[1].msg == "VLTGET", "open always sends VLTGET underneath")
+ok(#sent == 2 and sent[1].msg == "VLTGET" and sent[2].msg == "ICCOLL",
+    "open sends VLTGET + ICCOLL underneath")
 ok(lastStatus:find("6 in vault") ~= nil, "6 vault rows after dedupe: " .. lastStatus)
 ok(lastStatus:find("4 equippable") ~= nil, "bag+consumable excluded: " .. lastStatus)
 ok(lastStatus:find("2 with procs") ~= nil, "2 procs while maul uncached: " .. lastStatus)
@@ -194,7 +206,7 @@ ok(lastStatus:find("source: UncappedVault") == nil, "wire source has no tag")
 items[1005] = { name = "Mystery Maul", q = 4, ilvl = 210 }
 clock = clock + 2; tick()
 ok(lastStatus:find("3 with procs") ~= nil, "maul joins after cache: " .. lastStatus)
-ok(lastStatus:find("waiting") == nil, "pending cleared: " .. lastStatus)
+ok(lastStatus:find("waiting on item cache") == nil, "pending cleared: " .. lastStatus)
 
 --==================== VLTUPD debounce + cooldown ====================
 local before = #sent
@@ -302,8 +314,8 @@ ok(lastStatus:find("1 flat%-stat hidden") ~= nil,
 --==================== instant global read on open ====================
 SlashCmdList["PROCHUNTER"]()  -- close
 UncappedVault = { items = {
-    { itemId = 1001, stackCount = 3, suffixId = 0, rarity = 4, itemLevel = 200 },
-    { itemId = 1008, stackCount = 1 },
+    { e = 1001, itemId = 1001, stackCount = 3, suffixId = 0, rarity = 4, itemLevel = 200 },
+    { e = 1008, itemId = 1008, stackCount = 1 },
 } }
 clock = clock + 4
 SlashCmdList["PROCHUNTER"]()  -- open: must fill instantly, no clock advance
@@ -312,17 +324,51 @@ ok(lastStatus:find("2 in vault") ~= nil and lastStatus:find("source: UncappedVau
 ok(lastStatus:find("2 with procs") ~= nil, "blade+blade matched from global: " .. lastStatus)
 
 --==================== 2s poll picks up changes ====================
-UncappedVault.items[#UncappedVault.items + 1] = { itemId = 1005, stackCount = 1 }
+UncappedVault.items[#UncappedVault.items + 1] = { e = 1005, itemId = 1005, stackCount = 1 }
 clock = clock + 2.1; tick()
 ok(lastStatus:find("3 in vault") ~= nil, "poll absorbed a new deposit: " .. lastStatus)
 
+--==================== extraction collection + ticks ====================
+ok(lastStatus:find("awaiting extraction data") ~= nil,
+    "status flags missing collection: " .. lastStatus)
+local sawColl = false
+for i = 1, #sent do if sent[i].msg == "ICCOLL" then sawColl = true end end
+ok(sawColl, "ICCOLL requested on open")
+items[1010] = { name = "Dual Axe", q = 3, ilvl = 160 }
+UncappedVault.items[#UncappedVault.items + 1] = { e = 1010, itemId = 1010, stackCount = 1 }
+clock = clock + 2.1; tick() -- poll absorbs the axe
+-- collection: Frost Bite unlocked via one rank (100); Fire Burst only for the axe
+feed("ICCOLLROW:100:2:5555;")
+feed("ICCOLLROW:555:2:6666;")
+feed("ICCOLLEND:")
+ok(lastStatus:find("awaiting extraction data") == nil,
+    "collection received: " .. lastStatus)
+local function RowFor(e)
+    for _, f in ipairs(frames) do
+        if f.data and type(f.data) == "table" and f.data.e == e then return f end
+    end
+end
+local function TickOf(e)
+    local f = RowFor(e)
+    return f and f.tick
+end
+local bladeTick = TickOf(1001)
+ok(bladeTick and bladeTick._shown == true and bladeTick._vr == 1
+    and bladeTick._vg == 1, "full tick on blade (any rank of the name counts)")
+local axeTick = TickOf(1010)
+ok(axeTick and axeTick._shown == true and axeTick._vg and axeTick._vg < 1,
+    "partial tick (dimmed yellow) on the dual axe")
+local mystTick = TickOf(1005)
+ok(mystTick and mystTick._shown == false, "no tick on unextracted maul")
+
 --==================== withdraw: route 1 success ====================
-UncappedVault.Withdraw = function(e, rp, c)
+UncappedVault.Withdraw = function(row, c) -- pinned signature: (rowTable, count)
+    assert(type(row) == "table", "Withdraw must receive the row table")
+    c = math.min(c or 1, row.stackCount or 1)
     for i = #UncappedVault.items, 1, -1 do
-        local r = UncappedVault.items[i]
-        if r.itemId == e then
-            r.stackCount = (r.stackCount or 1) - c
-            if r.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+        if UncappedVault.items[i] == row then
+            row.stackCount = (row.stackCount or 1) - c
+            if row.stackCount <= 0 then table.remove(UncappedVault.items, i) end
             return
         end
     end
@@ -338,7 +384,7 @@ blade._scripts["OnClick"](blade, "RightButton")
 ok(lastStatus:find("withdrawing") ~= nil, "withdraw pending state: " .. lastStatus)
 clock = clock + 1.6; tick()
 ok(lastStatus:find("withdrawn: ") ~= nil, "route 1 withdraw verified: " .. lastStatus)
-ok(lastStatus:find("2 in vault") ~= nil, "blade left the list: " .. lastStatus)
+ok(lastStatus:find("3 in vault") ~= nil, "blade left the list: " .. lastStatus)
 ok(ProcHunterDB.wdRoute == 1, "working route remembered")
 
 --==================== withdraw: right-click is ALWAYS one ====================
@@ -372,19 +418,19 @@ clock = clock + 1.6; tick()
 ok(lastStatus:find("refused or ignored") ~= nil, "failure surfaced: " .. lastStatus)
 ok(ProcHunterDB.wdRoute == nil, "remembered route cleared on failure")
 
---==================== one-per-call route: target loop drains the stack ====================
-UncappedVault.Withdraw = function(e, rp, c)  -- live behavior: ignores count
+--==================== amount dialog: clamp + single pinned call ====================
+UncappedVault.Withdraw = function(row, c) -- pinned signature, count honored
+    c = math.min(c or 1, row.stackCount or 1)
     for i = #UncappedVault.items, 1, -1 do
-        local r = UncappedVault.items[i]
-        if r.itemId == e then
-            r.stackCount = (r.stackCount or 1) - 1
-            if r.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+        if UncappedVault.items[i] == row then
+            row.stackCount = (row.stackCount or 1) - c
+            if row.stackCount <= 0 then table.remove(UncappedVault.items, i) end
             return
         end
     end
 end
 local stack2 = RowFor(1001)
-ok(stack2 and stack2.data.count == 2, "stack x2 present for loop test")
+ok(stack2 and stack2.data.count == 2, "stack x2 present for amount test")
 shiftDown = true
 stack2._scripts["OnClick"](stack2, "RightButton")
 shiftDown = false
@@ -392,23 +438,21 @@ local dlg2 = _G["ProcHunterAmountDialog"]
 dlg2.edit:SetText("99") -- over the stack: must clamp to 2
 dlg2.okBtn._scripts["OnClick"]()
 clock = clock + 1.6; tick()
-ok(lastStatus:find("withdrawing") ~= nil and lastStatus:find("1/2") ~= nil,
-    "one copy moved, loop continuing: " .. lastStatus)
-clock = clock + 1.0; tick()
 ok(lastStatus:find("withdrawn: ") ~= nil and lastStatus:find("x2") ~= nil,
-    "loop drained the full stack: " .. lastStatus)
-ok(RowFor(1001) == nil, "stack row gone after full drain")
-ok(ProcHunterDB.wdRoute == 1, "route re-remembered by the loop")
+    "clamped amount delivered in ONE pinned call: " .. lastStatus)
+ok(RowFor(1001) == nil, "stack row gone after drain")
+ok(ProcHunterDB.wdRoute == 1, "route re-remembered")
 
 --==================== one-per-call: partial stop reports N of M ====================
 UncappedVault.items[#UncappedVault.items + 1] =
-    { itemId = 1006, stackCount = 4, suffixId = -13 }
+    { e = 1006, itemId = 1006, rp = -13, stackCount = 4, suffixId = -13 }
 local budget = 2
 local realWithdraw = UncappedVault.Withdraw
-UncappedVault.Withdraw = function(e, rp, c)
+UncappedVault.Withdraw = function(row, c)
     if budget <= 0 then return end -- bags full: server silently refuses
-    budget = budget - 1
-    realWithdraw(e, rp, c)
+    local give = math.min(c or 1, budget)
+    budget = budget - give
+    realWithdraw(row, give)
 end
 clock = clock + 2.1; tick() -- poll absorbs the new row
 local ring = RowFor(1006)
@@ -428,8 +472,9 @@ ok(RowFor(1006) and RowFor(1006).data.count == 2, "ring stack reduced 4 -> 2")
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
-    ok(sent[i].msg == "VLTGET" or sent[i].msg:find("^VLTWD:") ~= nil,
-        "wire send #" .. i .. " is VLTGET or VLTWD only")
+    ok(sent[i].msg == "VLTGET" or sent[i].msg == "ICCOLL"
+        or sent[i].msg:find("^VLTWD:") ~= nil,
+        "wire send #" .. i .. " is VLTGET, ICCOLL or VLTWD only")
 end
 local chatBefore = #chat
 SlashCmdList["PROCHUNTER"]("debug")
