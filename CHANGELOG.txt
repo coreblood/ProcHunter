@@ -1,6 +1,33 @@
 ProcHunter — Changelog
 ======================
 
+v1.3.0 (2026-09-11)
+-------------------
+- FIX: withdrawing a stack now delivers the WHOLE stack. The live
+  withdraw route ignores the count and moves one copy per call, so
+  withdrawal is now target-based: the proven route is re-fired on a
+  ~0.9s cadence, measuring the actual delta each cycle, until the
+  requested count has moved or the row is gone. If deliveries stop
+  mid-way (bags full, refusal) it stops and reports "N of M
+  (stopped)" instead of pretending it finished. Shift+Right-click
+  (withdraw one) unchanged. The status line shows live progress
+  ("withdrawing <item> 3/20...").
+- FIX (flat filter): any PERCENTAGE bonus now classifies as a real
+  effect and stays visible ("Improves critical strike damage by
+  3.15%") — only plain-number flat stats are hidden. Consequence:
+  "chance to hit by 1%"-style lines are also visible again.
+- Resizable window: drag the grip in the bottom-right corner
+  (430x240 min, 1200x900 max, size saved). Row count follows the
+  height and the name column stretches with the width.
+- Look options (Interface -> AddOns -> ProcHunter): window opacity
+  slider (20-100%), font size slider (8-18), and a font button
+  cycling the client's four built-in fonts (Friz Quadrata, Arial
+  Narrow, Skurri, Morpheus). All saved.
+- Still queued, blocked on the current server addon pack being
+  uploaded: green tick for already-extracted procs (no data source
+  exists client-side without dissecting where the extraction
+  collection lives), and pinning the withdraw route properly.
+
 v1.2.0 (2026-09-11)
 -------------------
 - Right-click a row to WITHDRAW the item to your bags (whole stack);
