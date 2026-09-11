@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.5.3 — Uncapped Vault proc scanner
+-- ProcHunter v1.5.4 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.5.3"
+local VERSION = "1.5.4"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -1383,14 +1383,9 @@ RefreshList = function()
     if not snapshotSeen then
         tail = awaitingAt and "  ·  |cff80ffffreading vault...|r"
             or "  ·  |cffff8080no vault data yet — Refresh (then /ph dump if still empty)|r"
-    elseif dataSource == "UncappedVault" then
-        tail = "  ·  source: UncappedVault"
     end
     if not collSet then
         tail = tail .. "  ·  |cff888888awaiting extraction data|r"
-    end
-    if db.hideFlat and flatHidden > 0 then
-        tail = tail .. format("  ·  |cff888888%d flat-stat hidden|r", flatHidden)
     end
     if pendingWD then
         tail = tail .. format("  ·  |cff80ffffwithdrawing %s %d/%d (route %d)...|r",
@@ -1414,8 +1409,8 @@ RefreshList = function()
         tail = tail .. "  ·  |cffff8080extract aborted: " .. exFailMsg .. "|r"
     end
     ui.status:SetText(format(
-        "%d in vault  ·  %d equippable  ·  |cff33ff99%d with procs|r  ·  showing %d%s%s",
-        #vault, eqCount, procCount, #shown,
+        "%d in vault  ·  |cff33ff99%d with procs|r%s%s",
+        #vault, procCount,
         pendingN > 0
             and format("  ·  |cff80ffff%d waiting on item cache|r", pendingN)
             or "",
@@ -1479,6 +1474,22 @@ ShowExtractDialog = function()
                     ShowExtractDialog() -- redraw selection
                 end
             end)
+            pr:SetScript("OnEnter", function(self)
+                if not self.row then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                -- the spell's own tooltip, same text the game shows
+                GameTooltip:SetHyperlink("spell:" .. self.row.spell)
+                local tr = self.row.trigger
+                if tr and tr > 0 then
+                    GameTooltip:AddLine(" ")
+                    GameTooltip:AddLine("Trigger type " .. tr,
+                        0.6, 0.6, 0.6)
+                end
+                GameTooltip:Show()
+            end)
+            pr:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
             pr:Hide()
             exDlg.rows[i] = pr
         end
@@ -1487,7 +1498,7 @@ ShowExtractDialog = function()
             "UIPanelButtonTemplate")
         exDlg.okBtn:SetWidth(140); exDlg.okBtn:SetHeight(22)
         exDlg.okBtn:SetPoint("BOTTOMLEFT", 16, 14)
-        exDlg.okBtn:SetText("Destroy && Learn")
+        exDlg.okBtn:SetText("Destroy & Learn")
         exDlg.okBtn:SetScript("OnClick", ConfirmExtract)
 
         exDlg.cancelBtn = CreateFrame("Button", nil, exDlg,
