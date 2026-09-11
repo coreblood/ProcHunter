@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.4.1 — Uncapped Vault proc scanner
+-- ProcHunter v1.5.0 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -20,6 +20,17 @@
 -- kept as a bag-space safety net: delta is measured after each call
 -- and partial deliveries report "N of M (stopped)".
 --
+-- EXTRACT FLOW (Ctrl+Right-click): withdraw one copy -> identify the
+-- exact bag slot it landed in (bag snapshot diff: only the slot that
+-- APPEARED can ever be destroyed — a pre-existing, possibly imprinted
+-- copy never is) -> ICEXSRC/ICEXI..ICEXIEND locates spell+trigger ->
+-- named consent dialog ("This DESTROYS the withdrawn copy") ->
+-- ICUNLOCK:<bag>:<slot>:<spell>:<trigger> -> ICUNLOCKED flips the
+-- tick live. Free on this realm (scrolls retired). Every stage has a
+-- timeout that aborts loudly with nothing destroyed; the dialog only
+-- allows procs not already unlocked; the slot is re-verified at the
+-- moment of confirm and any drift aborts.
+--
 -- EXTRACTION TICK: ProcHunter requests the account's unlocked-proc
 -- collection itself (ICCOLL -> ICCOLLROW:<spell>:<trigger>:<src> ...
 -- ICCOLLEND, still ordinary UNC addon messages) and shows a green
@@ -37,7 +48,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.4.1"
+local VERSION = "1.5.0"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -102,6 +113,10 @@ local ROWH         = 22     -- current row height (depends on font size)
 local ApplyLook             -- forward: applies font/size/alpha + relayout
 local amtDlg                -- withdraw-amount dialog (lazy)
 local collSet      = nil    -- spellId -> true (account's unlocked procs)
+local exFlow       = nil    -- in-flight extract {stage,e,rp,name,snap,bag,slot,rows,chosen,at}
+local exDlg                 -- extract consent dialog (lazy)
+local exDoneAt, exDoneName  -- success flash
+local exFailMsg    = nil    -- sticky abort reason
 local collStaging  = nil
 local lastCollReq  = 0
 
@@ -553,6 +568,108 @@ local function StartWithdraw(m, count)
     if RefreshList then RefreshList() end
 end
 
+--========================= extract flow ==============================
+local function BagEntry(bag, slot)
+    local link = GetContainerItemLink(bag, slot)
+    return link and tonumber(match(link, "item:(%d+)")) or 0
+end
+
+local function SnapshotBags()
+    local snap = {}
+    for bag = 0, 4 do
+        local n = GetContainerNumSlots(bag) or 0
+        for slot = 1, n do
+            snap[bag .. ":" .. slot] = BagEntry(bag, slot)
+        end
+    end
+    return snap
+end
+
+-- Only a slot that newly GAINED the entry qualifies: a pre-existing
+-- (possibly imprinted) copy must never be the one destroyed.
+local function FindNewCopy(snap, e)
+    for bag = 0, 4 do
+        local n = GetContainerNumSlots(bag) or 0
+        for slot = 1, n do
+            if BagEntry(bag, slot) == e
+                and snap[bag .. ":" .. slot] ~= e then
+                return bag, slot
+            end
+        end
+    end
+end
+
+local function AbortExtract(reason)
+    exFlow = nil
+    exFailMsg = reason
+    if exDlg then exDlg:Hide() end
+    if RefreshList then RefreshList() end
+end
+
+local ShowExtractDialog -- forward (defined with the UI section below)
+
+local function StartExtract(m)
+    if pendingWD or exFlow then return end
+    exFailMsg, exDoneAt, exDoneName = nil, nil, nil
+    exFlow = {
+        stage = "withdraw", e = m.e, rp = m.rp or 0,
+        name = m.name or "?", q = m.q,
+        snap = SnapshotBags(), at = GetTime(),
+    }
+    StartWithdraw(m, 1)
+    if not pendingWD then -- withdraw could not even start
+        AbortExtract("withdrawal could not start")
+    end
+end
+
+local function ConfirmExtract()
+    local w = exFlow
+    if not w or not w.chosen then return end
+    if exDlg then exDlg:Hide() end
+    -- the slot is re-verified at the moment of truth; any drift aborts
+    if BagEntry(w.bag, w.slot) ~= w.e then
+        AbortExtract("the bag slot changed — nothing destroyed")
+        return
+    end
+    w.stage = "unlock"
+    w.at = GetTime()
+    SendAddonMessage(SEND_PREFIX, format("ICUNLOCK:%d:%d:%d:%d",
+        w.bag, w.slot, w.chosen.spell, w.chosen.trigger or 0),
+        "WHISPER", UnitName("player"))
+    if RefreshList then RefreshList() end
+end
+
+local function ExtractTick(now)
+    local w = exFlow
+    if not w then
+        if exDoneAt and now - exDoneAt > 5 then
+            exDoneAt, exDoneName = nil, nil
+            if RefreshList then RefreshList() end
+        end
+        return
+    end
+    if w.stage == "withdraw" then
+        local bag, slot = FindNewCopy(w.snap, w.e)
+        if bag then
+            w.bag, w.slot = bag, slot
+            w.stage = "locate"
+            w.at = now
+            SendAddonMessage(SEND_PREFIX, "ICEXSRC", "WHISPER",
+                UnitName("player"))
+        elseif now - w.at > 8 then
+            AbortExtract("the withdrawn copy never reached your bags")
+        end
+    elseif w.stage == "locate" then
+        if now - w.at > 6 then
+            AbortExtract("no answer from the extraction picker")
+        end
+    elseif w.stage == "unlock" then
+        if now - w.at > 6 then
+            AbortExtract("unlock not confirmed — check the Wardrobe before retrying")
+        end
+    end
+end
+
 -- Shift+Right-click: ask for an amount. Right-click alone withdraws
 -- exactly ONE — on a vault with 17k-item stacks, bulk must never
 -- happen by accident (learned the hard way in v1.3.0).
@@ -719,6 +836,47 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
         end
     elseif find(msg, "^VLTEND:") or msg == "VLTEND" then
         CommitSnapshot("wire")
+    elseif find(msg, "^ICEXI:") then
+        if exFlow and exFlow.stage == "locate" then
+            local b, sl, en, eq, sp, tr = match(msg,
+                "^ICEXI:(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)$")
+            if b and tonumber(b) == exFlow.bag
+                and tonumber(sl) == exFlow.slot
+                and tonumber(en) == exFlow.e
+                and tonumber(sp) > 0 then
+                exFlow.rows = exFlow.rows or {}
+                exFlow.rows[#exFlow.rows + 1] =
+                    { spell = tonumber(sp), trigger = tonumber(tr) }
+            end
+        end
+    elseif find(msg, "^ICEXIEND") then
+        if exFlow and exFlow.stage == "locate" then
+            if exFlow.rows and #exFlow.rows > 0 then
+                exFlow.stage = "dialog"
+                exFlow.at = GetTime()
+                if ShowExtractDialog then ShowExtractDialog() end
+            else
+                AbortExtract("the server reports no extractable proc on this copy")
+            end
+        end
+    elseif find(msg, "^ICUNLOCKED:") then
+        local sp = tonumber(match(msg, "^ICUNLOCKED:(%d+)"))
+        if sp then
+            collSet = collSet or {}
+            collSet[sp] = true
+            if exFlow and exFlow.stage == "unlock"
+                and exFlow.chosen and exFlow.chosen.spell == sp then
+                exDoneAt = GetTime()
+                exDoneName = GetSpellInfo(sp) or ("#" .. sp)
+                exFlow = nil
+            end
+            Rebuild() -- Dashboard unlocks absorbed too: ticks stay live
+        end
+    elseif find(msg, "^ICERR:") then
+        if exFlow then
+            AbortExtract("server refused: " ..
+                (match(msg, "^ICERR:[^:]*:(.*)$") or msg))
+        end
     elseif find(msg, "^ICCOLLROW:") then
         local sp = match(msg, "^ICCOLLROW:(%d+):")
         if sp then
@@ -756,6 +914,7 @@ ticker:SetScript("OnUpdate", function()
         TryVaultGlobal()
     end
     CheckWithdraw(now)
+    ExtractTick(now)
     if wdDoneAt and now - wdDoneAt > 5 then
         wdDoneAt, wdDoneName = nil, nil
         if RefreshList then RefreshList() end
@@ -825,6 +984,8 @@ local function RowTooltip(row)
     end
     GameTooltip:AddLine("Right-click: withdraw ONE to bags", 0.7, 0.7, 0.7)
     GameTooltip:AddLine("Shift+Right-click: withdraw an amount...", 0.7, 0.7, 0.7)
+    GameTooltip:AddLine("Ctrl+Right-click: extract a proc (destroys one copy)",
+        0.7, 0.7, 0.7)
     GameTooltip:Show()
 end
 
@@ -939,7 +1100,9 @@ local function BuildUI()
 
         r:SetScript("OnClick", function(self, button)
             if button == "RightButton" and self.data then
-                if IsShiftKeyDown() then
+                if IsControlKeyDown() then
+                    StartExtract(self.data)
+                elseif IsShiftKeyDown() then
                     ShowAmountDialog(self.data)
                 else
                     StartWithdraw(self.data, 1) -- one, always
@@ -1103,6 +1266,19 @@ RefreshList = function()
     elseif wdFailed then
         tail = tail .. "  ·  |cffff8080withdraw refused or ignored — send me UncappedVault.lua to pin the route|r"
     end
+    if exFlow then
+        local st = exFlow.stage
+        local word = st == "withdraw" and "withdrawing a copy"
+            or st == "locate" and "locating the copy"
+            or st == "dialog" and "awaiting your choice"
+            or "awaiting unlock"
+        tail = tail .. format("  ·  |cff80ffffextracting %s: %s...|r",
+            exFlow.name, word)
+    elseif exDoneAt then
+        tail = tail .. format("  ·  |cff33ff33unlocked: %s|r", exDoneName or "")
+    elseif exFailMsg then
+        tail = tail .. "  ·  |cffff8080extract aborted: " .. exFailMsg .. "|r"
+    end
     ui.status:SetText(format(
         "%d in vault  ·  %d equippable  ·  |cff33ff99%d with procs|r  ·  showing %d%s%s",
         #vault, eqCount, procCount, #shown,
@@ -1110,6 +1286,134 @@ RefreshList = function()
             and format("  ·  |cff80ffff%d waiting on item cache|r", pendingN)
             or "",
         tail))
+end
+
+--==================== extract consent dialog =========================
+ShowExtractDialog = function()
+    local w = exFlow
+    if not w then return end
+    if not exDlg then
+        exDlg = CreateFrame("Frame", "ProcHunterExtractDialog", UIParent)
+        exDlg:SetWidth(340); exDlg:SetHeight(230)
+        exDlg:SetPoint("CENTER")
+        exDlg:SetFrameStrata("DIALOG")
+        exDlg:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = false, edgeSize = 32,
+            insets = { left = 8, right = 8, top = 8, bottom = 8 },
+        })
+        exDlg:SetBackdropColor(0.07, 0.07, 0.09, 1)
+        exDlg:EnableMouse(true)
+
+        exDlg.title = exDlg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        exDlg.title:SetPoint("TOP", 0, -16)
+        exDlg.title:SetText("Destroy & Learn")
+
+        exDlg.item = exDlg:CreateFontString(nil, "OVERLAY",
+            "GameFontHighlightSmall")
+        exDlg.item:SetPoint("TOP", exDlg.title, "BOTTOM", 0, -6)
+        exDlg.item:SetPoint("LEFT", 14, 0)
+        exDlg.item:SetPoint("RIGHT", -14, 0)
+
+        exDlg.warn = exDlg:CreateFontString(nil, "OVERLAY",
+            "GameFontHighlightSmall")
+        exDlg.warn:SetPoint("TOP", exDlg.item, "BOTTOM", 0, -4)
+        exDlg.warn:SetPoint("LEFT", 14, 0)
+        exDlg.warn:SetPoint("RIGHT", -14, 0)
+
+        exDlg.rows = {}
+        for i = 1, 6 do
+            local pr = CreateFrame("Button", nil, exDlg)
+            pr:SetHeight(18)
+            pr:SetPoint("TOPLEFT", 24, -84 - (i - 1) * 19)
+            pr:SetPoint("RIGHT", -24, 0)
+            pr:SetHighlightTexture(
+                "Interface\\QuestFrame\\UI-QuestTitleHighlight")
+            pr.dot = pr:CreateTexture(nil, "ARTWORK")
+            pr.dot:SetWidth(12); pr.dot:SetHeight(12)
+            pr.dot:SetPoint("LEFT", 0, 0)
+            pr.dot:SetTexture("Interface\\Buttons\\UI-RadioButton")
+            pr.txt = pr:CreateFontString(nil, "OVERLAY",
+                "GameFontHighlightSmall")
+            pr.txt:SetPoint("LEFT", pr.dot, "RIGHT", 6, 0)
+            pr.txt:SetPoint("RIGHT", 0, 0)
+            pr.txt:SetJustifyH("LEFT")
+            pr:SetScript("OnClick", function(self)
+                if exFlow and self.row and not self.row.owned then
+                    exFlow.chosen = self.row
+                    ShowExtractDialog() -- redraw selection
+                end
+            end)
+            pr:Hide()
+            exDlg.rows[i] = pr
+        end
+
+        exDlg.okBtn = CreateFrame("Button", nil, exDlg,
+            "UIPanelButtonTemplate")
+        exDlg.okBtn:SetWidth(140); exDlg.okBtn:SetHeight(22)
+        exDlg.okBtn:SetPoint("BOTTOMLEFT", 16, 14)
+        exDlg.okBtn:SetText("Destroy && Learn")
+        exDlg.okBtn:SetScript("OnClick", ConfirmExtract)
+
+        exDlg.cancelBtn = CreateFrame("Button", nil, exDlg,
+            "UIPanelButtonTemplate")
+        exDlg.cancelBtn:SetWidth(100); exDlg.cancelBtn:SetHeight(22)
+        exDlg.cancelBtn:SetPoint("BOTTOMRIGHT", -16, 14)
+        exDlg.cancelBtn:SetText("Cancel")
+        exDlg.cancelBtn:SetScript("OnClick", function()
+            AbortExtract("cancelled — the item stays in your bags")
+        end)
+
+        exDlg:Hide() -- shown-by-default rule
+    end
+
+    -- default selection: first proc not already unlocked
+    local anyLearnable = false
+    for i = 1, #w.rows do
+        local r = w.rows[i]
+        r.owned = collSet and collSet[r.spell] and true or false
+        if not r.owned then anyLearnable = true end
+    end
+    if not w.chosen or w.chosen.owned then
+        w.chosen = nil
+        for i = 1, #w.rows do
+            if not w.rows[i].owned then w.chosen = w.rows[i]; break end
+        end
+    end
+
+    exDlg.item:SetText(QualityHex(w.q) .. w.name .. "|r")
+    if anyLearnable then
+        exDlg.warn:SetText("|cffff4040This DESTROYS the withdrawn copy.|r" ..
+            "  One proc per copy.")
+        exDlg.okBtn:Enable()
+    else
+        exDlg.warn:SetText("|cff888888Every proc on this item is already " ..
+            "unlocked — nothing to learn. The copy stays in your bags.|r")
+        exDlg.okBtn:Disable()
+    end
+    for i = 1, 6 do
+        local pr = exDlg.rows[i]
+        local r = w.rows[i]
+        if r then
+            pr.row = r
+            local nm = GetSpellInfo(r.spell) or ("Spell #" .. r.spell)
+            if r.owned then
+                pr.txt:SetText("|cff666666" .. nm ..
+                    "  (already unlocked)|r")
+                pr.dot:SetVertexColor(0.4, 0.4, 0.4)
+            else
+                pr.txt:SetText((w.chosen == r and "|cff33ff99" or "|cffffffff")
+                    .. nm .. "|r")
+                pr.dot:SetVertexColor(1, 1, 1)
+            end
+            pr:Show()
+        else
+            pr.row = nil
+            pr:Hide()
+        end
+    end
+    exDlg:Show()
 end
 
 --========================= minimap button ============================
