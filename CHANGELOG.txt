@@ -1,6 +1,22 @@
 ProcHunter — Changelog
 ======================
 
+v1.5.4 (2026-09-11)
+-------------------
+DIALOG & STATUS POLISH
+
+- Hovering a proc in the Destroy & Learn dialog now shows the
+  spell's own tooltip (the same text the game shows anywhere else),
+  plus the trigger type underneath.
+- Button text fixed: "Destroy & Learn" (the doubled ampersand was
+  showing literally).
+- Status bar decluttered: the equippable count, data source tag,
+  "showing N" and the flat-stat hidden counter are gone. It now
+  reads just "<N> in vault  ·  <N> with procs" plus the withdraw /
+  extract messages when active.
+
+/reload suffices.
+
 v1.5.3 (2026-09-11)
 -------------------
 SERVER BAG NUMBERING FIX — the pushed stream was heard (v1.5.2's
