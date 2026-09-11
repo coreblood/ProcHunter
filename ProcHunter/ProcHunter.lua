@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.5.2 — Uncapped Vault proc scanner
+-- ProcHunter v1.5.3 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.5.2"
+local VERSION = "1.5.3"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -576,6 +576,17 @@ local function BagEntry(bag, slot)
     return link and tonumber(match(link, "item:(%d+)")) or 0
 end
 
+local function CountBagCopies(e)
+    local n = 0
+    for bag = 0, 4 do
+        local sn = GetContainerNumSlots(bag) or 0
+        for slot = 1, sn do
+            if BagEntry(bag, slot) == e then n = n + 1 end
+        end
+    end
+    return n
+end
+
 local function SnapshotBags()
     local snap = {}
     for bag = 0, 4 do
@@ -619,13 +630,47 @@ local function AddExRow(w, key, sp, tr)
     b[#b + 1] = { spell = sp, trigger = tr }
 end
 
--- terminal for the locate stage: resolve the pinned bucket
+-- terminal for the locate stage: resolve the pinned bucket.
+-- Returns true on success, or nil + reason ("none"/"dupes").
+-- The server may number bags/slots DIFFERENTLY than the client
+-- (confirmed live: pinned client bag:slot never matched a pushed
+-- ICITEM:B header). So: exact key first, then fall back to the one
+-- bucket whose proc NAMES match the item's own procs from the DB —
+-- accepted only while the item exists in bags exactly once, because
+-- only then can that bucket BE the fresh copy and nothing else.
+-- ICUNLOCK later echoes the bucket's own coords back (srvKey): the
+-- server understands its own numbering, whatever it is.
 local function ResolveExRows(w)
-    local b = w.cache and w.cache[w.bag .. ":" .. w.slot]
+    if not w.cache then return nil, "none" end
+    local key = w.bag .. ":" .. w.slot
+    local b = w.cache[key]
     if b and #b > 0 then
-        w.rows = b
+        w.srvKey, w.rows = key, b
         return true
     end
+    local cand, candKey, n = nil, nil, 0
+    for k, bk in pairs(w.cache) do
+        if #bk > 0 then
+            for i = 1, #bk do
+                local nm = GetSpellInfo(bk[i].spell)
+                if nm and w.expect and w.expect[lower(nm)] then
+                    n = n + 1
+                    cand, candKey = bk, k
+                    break
+                end
+            end
+        end
+    end
+    if n == 1 and CountBagCopies(w.e) == 1 then
+        w.srvKey, w.rows = candKey, cand
+        return true
+    elseif n >= 1 then
+        -- several matching buckets, or bag duplicates of the item:
+        -- the fresh copy cannot be told apart with certainty, and a
+        -- pre-existing (possibly imprinted) copy must NEVER be at risk
+        return nil, "dupes"
+    end
+    return nil, "none"
 end
 
 local function AbortExtract(reason)
@@ -640,9 +685,15 @@ local ShowExtractDialog -- forward (defined with the UI section below)
 local function StartExtract(m)
     if pendingWD or exFlow then return end
     exFailMsg, exDoneAt, exDoneName = nil, nil, nil
+    local exp = {}
+    local sl = m.spells or m.procs or {}
+    for i = 1, #sl do
+        local nm = GetSpellInfo(sl[i])
+        if nm then exp[lower(nm)] = true end
+    end
     exFlow = {
         stage = "withdraw", e = m.e, rp = m.rp or 0,
-        name = m.name or "?", q = m.q,
+        name = m.name or "?", q = m.q, expect = exp,
         snap = SnapshotBags(), at = GetTime(),
     }
     StartWithdraw(m, 1)
@@ -662,8 +713,12 @@ local function ConfirmExtract()
     end
     w.stage = "unlock"
     w.at = GetTime()
-    SendAddonMessage(SEND_PREFIX, format("ICUNLOCK:%d:%d:%d:%d",
-        w.bag, w.slot, w.chosen.spell, w.chosen.trigger or 0),
+    -- echo the server's OWN coords for the copy (srvKey from the
+    -- stream); its numbering can differ from the client's
+    local sb, ss = match(w.srvKey or (w.bag .. ":" .. w.slot),
+        "^(%d+):(%d+)$")
+    SendAddonMessage(SEND_PREFIX, format("ICUNLOCK:%s:%s:%d:%d",
+        sb, ss, w.chosen.spell, w.chosen.trigger or 0),
         "WHISPER", UnitName("player"))
     if RefreshList then RefreshList() end
 end
@@ -703,11 +758,14 @@ local function ExtractTick(now)
         end
     elseif w.stage == "locate" then
         if now - w.at > 6 then
-            if ResolveExRows(w) then
+            local hit, why = ResolveExRows(w)
+            if hit then
                 -- rows arrived but the END line never did — use them
                 w.stage = "dialog"
                 w.at = now
                 if ShowExtractDialog then ShowExtractDialog() end
+            elseif why == "dupes" then
+                AbortExtract("several copies of this item are in your bags — keep exactly ONE, then retry")
             else
                 AbortExtract("no answer from the extraction picker")
             end
@@ -923,10 +981,13 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
             -- during withdraw just closes the pushed cache — never
             -- an abort (the slot is not even pinned yet).
             if exFlow.stage == "locate" then
-                if ResolveExRows(exFlow) then
+                local hit, why = ResolveExRows(exFlow)
+                if hit then
                     exFlow.stage = "dialog"
                     exFlow.at = GetTime()
                     if ShowExtractDialog then ShowExtractDialog() end
+                elseif why == "dupes" then
+                    AbortExtract("several copies of this item are in your bags — keep exactly ONE, then retry")
                 else
                     AbortExtract("the server reports no extractable proc on this copy")
                 end
