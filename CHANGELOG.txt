@@ -1,6 +1,30 @@
 ProcHunter — Changelog
 ======================
 
+v1.5.3 (2026-09-11)
+-------------------
+SERVER BAG NUMBERING FIX — the pushed stream was heard (v1.5.2's
+cache worked) but the server numbers bags/slots differently than the
+client, so the pinned bag:slot never matched any ICITEM:B header and
+the flow aborted with "no extractable proc".
+
+- Resolution now falls back to matching buckets by the item's OWN
+  proc names (from the DB — the reason it is listed at all). Rank
+  variants count, same as ticks.
+- The fallback is accepted ONLY while exactly one copy of the item
+  is in your bags: only then can the matching bucket BE the fresh
+  copy. Otherwise the flow aborts with "several copies of this item
+  are in your bags — keep exactly ONE, then retry". A pre-existing,
+  possibly imprinted copy is never put at risk.
+- ICUNLOCK now echoes the server's own coordinates from the stream
+  back at it, whatever its numbering is.
+
+IMPORTANT after the failed attempts today: your bags likely hold
+several withdrawn copies of the item you tested. Deposit the extras
+back into the vault (keep NONE), then Ctrl+Right-click once.
+
+/reload suffices.
+
 v1.5.2 (2026-09-11)
 -------------------
 EXTRACTION RACE FIX — the real reason Ctrl+Right-click still looked
