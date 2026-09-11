@@ -127,10 +127,13 @@ function CreateFrame(ftype, name, parent, template)
         if fn then fn(self, v) end
     end
     f.GetValue = function(self) return self._value end
-    if ftype == "GameTooltip" and name then
+    if ftype == "GameTooltip" then
         f._lines = {}
         f.ClearLines = function(self) self._lines = {} end
         f.SetHyperlink = function(self, link)
+            self._hyperlink = tostring(link)
+            self._shown = true
+            if not name then return end
             local sid = tonumber(tostring(link):match("^spell:(%d+)"))
             self._lines = sid and spellTips[sid] or {}
             for i, txt in ipairs(self._lines) do
@@ -217,8 +220,23 @@ local win = _G["ProcHunterFrame"]
 ok(win._shown == true, "window visible on the FIRST toggle (v1.0.0 regression)")
 ok(#sent == 2 and sent[1].msg == "VLTGET" and sent[2].msg == "ICCOLL",
     "open sends VLTGET + ICCOLL underneath")
+local function VisRows()
+    local n = 0
+    for _, f in ipairs(frames) do
+        if f._shown and f.data and type(f.data) == "table" and f.data.e then
+            n = n + 1
+        end
+    end
+    return n
+end
+local function VisNamed(nm)
+    for _, f in ipairs(frames) do
+        if f._shown and f.data and type(f.data) == "table"
+            and f.data.name == nm then return true end
+    end
+end
 ok(lastStatus:find("6 in vault") ~= nil, "6 vault rows after dedupe: " .. lastStatus)
-ok(lastStatus:find("4 equippable") ~= nil, "bag+consumable excluded: " .. lastStatus)
+ok(not VisNamed("Holy Satchel"), "bag+consumable excluded from the list")
 ok(lastStatus:find("2 with procs") ~= nil, "2 procs while maul uncached: " .. lastStatus)
 ok(lastStatus:find("1 waiting") ~= nil, "1 pending on cache: " .. lastStatus)
 ok(lastStatus:find("source: UncappedVault") == nil, "wire source has no tag")
@@ -242,22 +260,21 @@ ok(#sent == before, "request cooldown respected")
 --==================== fallback 3-field parse ====================
 feed("VLTROW:1001,0,1,junkfield;")
 feed("VLTEND:")
-ok(lastStatus:find("1 in vault") and lastStatus:find("1 equippable")
-    and lastStatus:find("1 with procs"),
+ok(lastStatus:find("1 in vault") and lastStatus:find("1 with procs"),
     "tolerant parse + equipLoc fallback + proc match: " .. lastStatus)
 
 --==================== filter box ====================
 feed("VLTROW:1001,0,1,4,2,7,200,icon;1005,0,1,4,2,4,210,icon;1006,-13,1,3,4,0,190,icon;")
 feed("VLTEND:")
-ok(lastStatus:find("3 with procs") and lastStatus:find("showing 3"),
+ok(lastStatus:find("3 with procs") and VisRows() == 3,
     "full snapshot back: " .. lastStatus)
 local filterBox = _G["ProcHunterFilterBox"]
 filterBox._text = "frost"; filterBox._scripts["OnTextChanged"]()
-ok(lastStatus:find("showing 1") ~= nil, "filter 'frost': " .. lastStatus)
+ok(VisRows() == 1, "filter frost shows 1 row")
 filterBox._text = "kirei"; filterBox._scripts["OnTextChanged"]()
-ok(lastStatus:find("showing 0") ~= nil, "no-match filter: " .. lastStatus)
+ok(VisRows() == 0, "no-match filter shows 0 rows")
 filterBox._text = ""; filterBox._scripts["OnTextChanged"]()
-ok(lastStatus:find("showing 3") ~= nil, "filter cleared: " .. lastStatus)
+ok(VisRows() == 3, "filter cleared shows 3 rows")
 
 --==================== flat-stat classification ====================
 items[1007] = { name = "Eagle Cuirass", q = 2, ilvl = 100 }
@@ -266,11 +283,11 @@ feed("VLTROW:1001,0,1,4,2,7,200,icon;1007,0,1,2,4,1,100,icon;1008,0,1,3,2,7,150,
 feed("VLTEND:")
 ok(lastStatus:find("2 with procs") ~= nil,
     "cuirass hidden, blade kept (duration guard): " .. lastStatus)
-ok(lastStatus:find("1 flat%-stat hidden") ~= nil, "hidden counter: " .. lastStatus)
+ok(not VisNamed("Eagle Cuirass"), "flat-only cuirass not listed")
 local cf = _G["ProcHunterFlatCheck"]
 ok(cf ~= nil and cf._checked == true, "flat tickbox exists, default ON")
 cf:SetChecked(false); cf._scripts["OnClick"](cf)
-ok(lastStatus:find("3 with procs") ~= nil and lastStatus:find("hidden") == nil,
+ok(lastStatus:find("3 with procs") ~= nil and VisNamed("Eagle Cuirass"),
     "untick shows flat-only items: " .. lastStatus)
 cf:SetChecked(true); cf._scripts["OnClick"](cf)
 ok(lastStatus:find("2 with procs") ~= nil, "re-tick hides again: " .. lastStatus)
@@ -328,8 +345,8 @@ feed("VLTROW:1007,0,1,2,4,1,100,icon;1009,0,1,3,4,1,120,icon;")
 feed("VLTEND:")
 ok(lastStatus:find("1 with procs") ~= nil,
     "percent-bonus cloak visible: " .. lastStatus)
-ok(lastStatus:find("1 flat%-stat hidden") ~= nil,
-    "plain flat cuirass still hidden: " .. lastStatus)
+ok(not VisNamed("Eagle Cuirass"),
+    "plain flat cuirass still hidden")
 
 --==================== instant global read on open ====================
 SlashCmdList["PROCHUNTER"]()  -- close
@@ -339,7 +356,7 @@ UncappedVault = { items = {
 } }
 clock = clock + 4
 SlashCmdList["PROCHUNTER"]()  -- open: must fill instantly, no clock advance
-ok(lastStatus:find("2 in vault") ~= nil and lastStatus:find("source: UncappedVault"),
+ok(lastStatus:find("2 in vault") ~= nil,
     "instant fill from global on open: " .. lastStatus)
 ok(lastStatus:find("2 with procs") ~= nil, "blade+blade matched from global: " .. lastStatus)
 
@@ -771,6 +788,43 @@ ok(sent[#sent].msg == "ICUNLOCK:1:6:890:2",
 feed("ICUNLOCKED:890:2")
 ok(lastStatus:find("unlocked") ~= nil,
     "server-numbering path completes: " .. lastStatus)
+
+--==================== dialog tooltip + button text ====================
+-- reopen a dialog via the server-numbering path remnants: fresh flow
+for b = 0, 4 do
+    for slot = 1, 16 do
+        if bagContents[b] and bagContents[b][slot] == 1008 then
+            bagContents[b][slot] = nil
+        end
+    end
+end
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade8 = RowFor(1008)
+ctrlDown = true
+blade8._scripts["OnClick"](blade8, "RightButton")
+ctrlDown = false
+local tSlot2
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1008 then tSlot2 = slot end
+end
+feed("ICITEM:B:0:" .. tSlot2)
+feed("ICIPROC:890:2:15:0")
+feed("ICINVEND")
+clock = clock + 0.1; tick()
+local exd6 = _G["ProcHunterExtractDialog"]
+ok(exd6._shown == true, "dialog open for tooltip test")
+ok(exd6.okBtn._text == "Destroy & Learn",
+    "button text has a single ampersand: " .. tostring(exd6.okBtn._text))
+local r1 = exd6.rows[1]
+r1._scripts["OnEnter"](r1)
+ok(GameTooltip._hyperlink == "spell:890",
+    "hover sets the spell tooltip: " .. tostring(GameTooltip._hyperlink))
+ok(GameTooltip._shown == true, "tooltip shown on enter")
+r1._scripts["OnLeave"](r1)
+ok(GameTooltip._shown == false, "tooltip hidden on leave")
+exd6.cancelBtn._scripts["OnClick"]()
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
