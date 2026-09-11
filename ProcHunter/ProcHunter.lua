@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.3.1 — Uncapped Vault proc scanner
+-- ProcHunter v1.4.0 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -11,17 +11,21 @@
 -- open. VLTGET is still sent underneath; a wire snapshot, if one ever
 -- arrives, always takes over (and would bring VLTUPD-driven updates).
 --
--- WITHDRAW: the working call into kirei's addon is unknown until the
--- current UncappedVault.lua is dissected, so withdrawal is a VERIFIED
--- CASCADE of harmless-if-wrong attempts — after each route it waits,
--- re-reads the vault, and only moves to the next route if the item
--- did not move. At most one route can take effect; the first that
--- works is remembered (db.wdRoute). CONFIRMED LIVE: the working
--- route delivers ONE copy per call and ignores the count, so a
--- withdrawal is target-based — the proven route is re-fired on a
--- ~0.9s cadence, measuring the actual delta each cycle, until the
--- requested count has moved, the row is gone, or deliveries stop
--- (then it reports "N of M (stopped)").
+-- WITHDRAW (pinned from the dissected UncappedVault.lua, 2026-09-11):
+-- Core.Withdraw(itemRowTable, count) — the row's own table from
+-- Core.items (fields .e/.rp/.c), count clamped to the stack and sent
+-- as text (%.0f, server parses uint64). Route 1 finds the live row
+-- and calls it properly; routes 2 (Core.Send with the raw verb) and
+-- 3 (raw SendAddonMessage) remain as fallbacks. The verify loop is
+-- kept as a bag-space safety net: delta is measured after each call
+-- and partial deliveries report "N of M (stopped)".
+--
+-- EXTRACTION TICK: ProcHunter requests the account's unlocked-proc
+-- collection itself (ICCOLL -> ICCOLLROW:<spell>:<trigger>:<src> ...
+-- ICCOLLEND, still ordinary UNC addon messages) and shows a green
+-- tick left of the name when every proc NAME on the item is already
+-- unlocked, a dimmed yellow tick when only some are. Wardrobe
+-- streams triggered by other addons are absorbed for free.
 --
 -- Slash: /ph, /prochunter        toggle the window
 --        /ph debug               print all addon wire traffic (toggle)
@@ -33,7 +37,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.3.1"
+local VERSION = "1.4.0"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -45,7 +49,8 @@ local WIRE_WATCHDOG    = 5     -- silent seconds before the global fallback
 local POLL_INTERVAL    = 2     -- global re-read cadence while window open
 local WD_VERIFY_DELAY  = 1.5   -- seconds before verifying an unproven route
 local WD_REPEAT_DELAY  = 0.9   -- cadence once the route is proven
-local WD_MAX_ROUTE     = 5
+local WD_MAX_ROUTE     = 3
+local COLL_COOLDOWN    = 60    -- min seconds between ICCOLL requests
 local WD_MAX_CYCLES    = 200   -- hard cap on repeat cycles per withdrawal
 
 -- client built-in fonts (zero size cost)
@@ -96,6 +101,9 @@ local visRows      = 14     -- rows that fit the current window height
 local ROWH         = 22     -- current row height (depends on font size)
 local ApplyLook             -- forward: applies font/size/alpha + relayout
 local amtDlg                -- withdraw-amount dialog (lazy)
+local collSet      = nil    -- spellId -> true (account's unlocked procs)
+local collStaging  = nil
+local lastCollReq  = 0
 
 --========================= small helpers =============================
 local function Msg(text)
@@ -260,12 +268,34 @@ local function Rebuild()
                         procCount = procCount + 1
                         local link = ItemLink(row.e, row.rp)
                         local dispName = GetItemInfo(link) or baseName
+                        -- extraction status, judged per unique proc NAME
+                        -- (rank variants share a name; owning any rank
+                        -- counts that name as unlocked)
+                        local extN, extT = 0, 0
+                        if collSet and #procs > 0 then
+                            local byName = {}
+                            for j = 1, #procs do
+                                local id = procs[j]
+                                local nm = GetSpellInfo(id) or ("#" .. id)
+                                local slot = byName[nm]
+                                if not slot then
+                                    slot = false
+                                    extT = extT + 1
+                                end
+                                if collSet[id] then slot = true end
+                                byName[nm] = slot
+                            end
+                            for _, got in pairs(byName) do
+                                if got then extN = extN + 1 end
+                            end
+                        end
                         matched[#matched + 1] = {
                             e = row.e, rp = row.rp, count = row.count,
                             q = row.q, ilvl = row.ilvl,
                             name = dispName, link = link,
                             procs = procs, flats = flats,
                             spells = (#procs > 0) and procs or flats,
+                            extN = extN, extT = extT,
                         }
                     end
                 end
@@ -312,6 +342,13 @@ local function Request()
     dirtyAt = nil
     awaitingAt = now
     SendAddonMessage(SEND_PREFIX, "VLTGET", "WHISPER", UnitName("player"))
+end
+
+local function RequestCollection()
+    local now = GetTime()
+    if now - lastCollReq < COLL_COOLDOWN then return end
+    lastCollReq = now
+    SendAddonMessage(SEND_PREFIX, "ICCOLL", "WHISPER", UnitName("player"))
 end
 
 local function StagingSig()
@@ -451,24 +488,39 @@ local function RowCount(e, rp)
     return 0
 end
 
--- Fire exactly route L. Every attempt is pcall-guarded and harmless
--- if wrong; verification between firings guarantees at most one route
--- ever takes effect. The verb carries the remaining count for
--- count-honoring routes; the live route ignores it (one per call).
+local function FindUVRow(e, rp)
+    local UV = _G.UncappedVault
+    local src = UV and type(UV) == "table" and UV.items
+    if type(src) ~= "table" then return nil end
+    for i = 1, #src do
+        local r = src[i]
+        if type(r) == "table" and tonumber(r.e) == e
+            and (tonumber(r.rp) or 0) == (rp or 0) then
+            return r
+        end
+    end
+end
+
+-- Route 1 is the PINNED call from the dissected source:
+-- Core.Withdraw(itemRowTable, count) — the row's own table, count
+-- clamped server-addon-side to the stack. Routes 2/3 are fallbacks.
+-- Count travels as %.0f per kirei's DE-03 note (server parses the
+-- field as text; %.0f is exact where %d can wrap).
 local function TryRoute(w, L)
     local UV = _G.UncappedVault
     local rem = w.target - w.moved
     if rem < 1 then rem = 1 end
-    local verb = format("VLTWD:%d:%d:%d", w.e, w.rp or 0, rem)
+    local verb = format("VLTWD:%d:%d:%s", w.e, w.rp or 0,
+        format("%.0f", rem))
     if L == 1 and UV and type(UV.Withdraw) == "function" then
-        return pcall(UV.Withdraw, w.e, w.rp or 0, rem) and true or false
-    elseif L == 2 and UV and type(UV.Withdraw) == "function" then
-        return pcall(UV.Withdraw, UV, w.e, w.rp or 0, rem) and true or false
-    elseif L == 3 and UV and type(UV.Send) == "function" then
+        local row = FindUVRow(w.e, w.rp)
+        if row then
+            return pcall(UV.Withdraw, row, rem) and true or false
+        end
+        return false
+    elseif L == 2 and UV and type(UV.Send) == "function" then
         return pcall(UV.Send, verb) and true or false
-    elseif L == 4 and UV and type(UV.Send) == "function" then
-        return pcall(UV.Send, UV, verb) and true or false
-    elseif L == 5 then
+    elseif L == 3 then
         SendAddonMessage(SEND_PREFIX, verb, "WHISPER", UnitName("player"))
         return true
     end
@@ -666,6 +718,18 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
         end
     elseif find(msg, "^VLTEND:") or msg == "VLTEND" then
         CommitSnapshot("wire")
+    elseif find(msg, "^ICCOLLROW:") then
+        local sp = match(msg, "^ICCOLLROW:(%d+):")
+        if sp then
+            collStaging = collStaging or {}
+            collStaging[tonumber(sp)] = true
+        end
+    elseif find(msg, "^ICCOLLEND") then
+        if collStaging then
+            collSet = collStaging
+            collStaging = nil
+            Rebuild()
+        end
     elseif find(msg, "^VLTUPD") or find(msg, "^VLTROWUPD")
         or find(msg, "^VLTWDONE") or find(msg, "^VLTDEPALLDONE") then
         dirtyAt = GetTime()
@@ -748,6 +812,16 @@ local function RowTooltip(row)
             0.5, 0.5, 0.5)
     end
     GameTooltip:AddLine(" ")
+    if not collSet then
+        GameTooltip:AddLine("Extraction data not received yet", 0.6, 0.6, 0.6)
+    elseif row.extT and row.extT > 0 and row.extN >= row.extT then
+        GameTooltip:AddLine("Extracted: all procs already unlocked", 0.2, 1, 0.4)
+    elseif row.extN and row.extN > 0 then
+        GameTooltip:AddLine(format("Extracted: %d of %d procs unlocked",
+            row.extN, row.extT), 1, 0.85, 0.15)
+    else
+        GameTooltip:AddLine("Extracted: none yet", 0.6, 0.6, 0.6)
+    end
     GameTooltip:AddLine("Right-click: withdraw ONE to bags", 0.7, 0.7, 0.7)
     GameTooltip:AddLine("Shift+Right-click: withdraw an amount...", 0.7, 0.7, 0.7)
     GameTooltip:Show()
@@ -792,8 +866,10 @@ local function BuildUI()
     refresh:SetText("Refresh")
     refresh:SetScript("OnClick", function()
         lastRequest = 0
+        lastCollReq = 0
         TryVaultGlobal()
         Request()
+        RequestCollection()
     end)
 
     local filterLabel = ui:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -843,8 +919,14 @@ local function BuildUI()
         r.ilvl:SetPoint("LEFT", r.icon, "RIGHT", 6, 0)
         r.ilvl:SetWidth(34); r.ilvl:SetJustifyH("RIGHT")
 
+        r.tick = r:CreateTexture(nil, "ARTWORK")
+        r.tick:SetWidth(14); r.tick:SetHeight(14)
+        r.tick:SetPoint("LEFT", r.ilvl, "RIGHT", 4, 0)
+        r.tick:SetTexture("Interface\\RaidFrame\\ReadyCheck-Ready")
+        r.tick:Hide()
+
         r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.name:SetPoint("LEFT", r.ilvl, "RIGHT", 8, 0)
+        r.name:SetPoint("LEFT", r.tick, "RIGHT", 4, 0)
         r.name:SetWidth(280); r.name:SetJustifyH("LEFT")
 
         r.proc = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -976,6 +1058,15 @@ RefreshList = function()
             local cnt = (m.count and m.count > 1)
                 and (" |cff888888x" .. m.count .. "|r") or ""
             r.name:SetText(QualityHex(m.q) .. (m.name or "?") .. "|r" .. cnt)
+            if m.extT and m.extT > 0 and m.extN >= m.extT then
+                r.tick:SetVertexColor(1, 1, 1)       -- green tick: all unlocked
+                r.tick:Show()
+            elseif m.extN and m.extN > 0 then
+                r.tick:SetVertexColor(1, 0.85, 0.15) -- dimmed yellow: partial
+                r.tick:Show()
+            else
+                r.tick:Hide()
+            end
             local lines = ProcLines(m.spells)
             local names = {}
             for j = 1, #lines do names[j] = lines[j].name end
@@ -994,6 +1085,9 @@ RefreshList = function()
             or "  ·  |cffff8080no vault data yet — Refresh (then /ph dump if still empty)|r"
     elseif dataSource == "UncappedVault" then
         tail = "  ·  source: UncappedVault"
+    end
+    if not collSet then
+        tail = tail .. "  ·  |cff888888awaiting extraction data|r"
     end
     if db.hideFlat and flatHidden > 0 then
         tail = tail .. format("  ·  |cff888888%d flat-stat hidden|r", flatHidden)
@@ -1184,7 +1278,8 @@ local function Toggle()
         ui:Show()
         TryVaultGlobal()   -- instant fill from the confirmed data path
         RefreshList()
-        Request()          -- wire attempt underneath, in case it ever lives
+        Request()          -- also nudges kirei's addon to refresh its table
+        RequestCollection()
     end
 end
 
@@ -1213,6 +1308,7 @@ init:SetScript("OnEvent", function(_, event, arg1)
         ProcHunterDB = ProcHunterDB or {}
         db = ProcHunterDB
         if db.hideFlat == nil then db.hideFlat = true end
+        if db.wdSchema ~= 2 then db.wdRoute = nil; db.wdSchema = 2 end
         if db.fontSize == nil then db.fontSize = 11 end
         if db.alpha == nil then db.alpha = 1 end
         if db.font == nil then db.font = 1 end
