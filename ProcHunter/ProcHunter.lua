@@ -23,7 +23,8 @@
 -- EXTRACT FLOW (Ctrl+Right-click): withdraw one copy -> identify the
 -- exact bag slot it landed in (bag snapshot diff: only the slot that
 -- APPEARED can ever be destroyed — a pre-existing, possibly imprinted
--- copy never is) -> ICEXSRC/ICEXI..ICEXIEND locates spell+trigger ->
+-- copy never is) -> ICEXSRC+ICINV asked; either dialect locates
+-- spell+trigger (ICEXI..ICEXIEND, or ICITEM:B + ICIPROC..ICINVEND) ->
 -- named consent dialog ("This DESTROYS the withdrawn copy") ->
 -- ICUNLOCK:<bag>:<slot>:<spell>:<trigger> -> ICUNLOCKED flips the
 -- tick live. Free on this realm (scrolls retired). Every stage has a
@@ -599,6 +600,18 @@ local function FindNewCopy(snap, e)
     end
 end
 
+-- both wire dialects feed rows through here; dedupe guards the case
+-- of a realm answering both ICEXSRC and ICINV for the same copy
+local function AddExRow(w, sp, tr)
+    tr = tr or 0
+    w.seen = w.seen or {}
+    local k = sp .. ":" .. tr
+    if w.seen[k] then return end
+    w.seen[k] = true
+    w.rows = w.rows or {}
+    w.rows[#w.rows + 1] = { spell = sp, trigger = tr }
+end
+
 local function AbortExtract(reason)
     exFlow = nil
     exFailMsg = reason
@@ -654,7 +667,12 @@ local function ExtractTick(now)
             w.bag, w.slot = bag, slot
             w.stage = "locate"
             w.at = now
+            -- both dialects requested; whichever the realm speaks, we hear.
+            -- Old pack answers ICEXSRC with ICEXI rows; the live realm
+            -- ignores it and answers ICINV with ICITEM/ICIPROC instead.
             SendAddonMessage(SEND_PREFIX, "ICEXSRC", "WHISPER",
+                UnitName("player"))
+            SendAddonMessage(SEND_PREFIX, "ICINV", "WHISPER",
                 UnitName("player"))
         elseif now - w.at > 8 then
             AbortExtract("the withdrawn copy never reached your bags")
@@ -844,12 +862,29 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
                 and tonumber(sl) == exFlow.slot
                 and tonumber(en) == exFlow.e
                 and tonumber(sp) > 0 then
-                exFlow.rows = exFlow.rows or {}
-                exFlow.rows[#exFlow.rows + 1] =
-                    { spell = tonumber(sp), trigger = tonumber(tr) }
+                AddExRow(exFlow, tonumber(sp), tonumber(tr))
             end
         end
-    elseif find(msg, "^ICEXIEND") then
+    elseif find(msg, "^ICITEM:") then
+        -- live-realm ICINV dialect: an ICITEM header announces which
+        -- item the ICIPROC rows that follow belong to. Only a B (bag)
+        -- header for OUR pinned bag/slot opens the gate; any other
+        -- header (equipped gear, other slots) closes it.
+        if exFlow and exFlow.stage == "locate" then
+            local b, sl = match(msg, "^ICITEM:B:(%d+):(%d+)")
+            exFlow.inHdr = (b ~= nil
+                and tonumber(b) == exFlow.bag
+                and tonumber(sl) == exFlow.slot) or nil
+        end
+    elseif find(msg, "^ICIPROC:") then
+        -- ICIPROCBP/ICIPROCFACT/ICIPROCSRC lack the colon there: no match
+        if exFlow and exFlow.stage == "locate" and exFlow.inHdr then
+            local sp, tr = match(msg, "^ICIPROC:(%d+):(%d+)")
+            if sp and tonumber(sp) > 0 then
+                AddExRow(exFlow, tonumber(sp), tonumber(tr))
+            end
+        end
+    elseif find(msg, "^ICEXIEND") or find(msg, "^ICINVEND") then
         if exFlow and exFlow.stage == "locate" then
             if exFlow.rows and #exFlow.rows > 0 then
                 exFlow.stage = "dialog"
