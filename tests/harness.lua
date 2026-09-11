@@ -645,6 +645,73 @@ ok(sent[#sent].msg == ("ICUNLOCK:0:" .. bSlot .. ":888:2"),
 feed("ICUNLOCKED:888:2")
 ok(lastStatus:find("unlocked") ~= nil, "ICINV path completes: " .. lastStatus)
 
+--==================== extract flow: pushed stream race ====================
+-- the live realm pushes ICINV the instant the copy lands — BEFORE the
+-- bag diff has pinned the slot. Cache must catch it; no request needed.
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade4 = RowFor(1008)
+ok(blade4 ~= nil, "blade back for race test")
+ctrlDown = true
+blade4._scripts["OnClick"](blade4, "RightButton")
+ctrlDown = false
+-- copy is in bags NOW (stub Withdraw is synchronous) but NO tick has
+-- run: stage is still "withdraw", slot unpinned. The server pushes:
+local rSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1008 then rSlot = slot end
+end
+ok(rSlot ~= nil, "copy landed before any tick")
+feed("ICITEM:B:4:19")
+feed("ICIPROC:999:1:50:0")            -- someone else's item
+feed("ICITEM:B:0:" .. rSlot)
+feed("ICIPROC:889:2:15:0")            -- ours
+feed("ICITEM:E:0:1")                  -- equipped gear closes the bucket
+feed("ICIPROC:997:1:5:0")             -- must not leak into ours
+feed("ICINVEND")                       -- END during withdraw: NOT an abort
+ok(lastStatus:find("extract aborted") == nil,
+    "pushed END during withdraw does not abort")
+local reqBefore = #sent
+clock = clock + 0.1; tick()            -- pin slot -> cache hit -> dialog
+local exd3 = _G["ProcHunterExtractDialog"]
+ok(exd3._shown == true, "dialog opened straight from the pushed cache")
+ok(#sent == reqBefore, "cache hit sent ZERO locate requests")
+local nr = 0
+for i = 1, 6 do
+    if exd3.rows[i] and exd3.rows[i].row then nr = nr + 1 end
+end
+ok(nr == 1 and exd3.rows[1].row.spell == 889,
+    "only the pinned slot's proc resolved (got " .. nr .. ")")
+clock = clock + 1.6; tick()            -- let the withdraw verify settle
+exd3.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg == ("ICUNLOCK:0:" .. rSlot .. ":889:2"),
+    "ICUNLOCK correct after cache-hit path")
+feed("ICUNLOCKED:889:2")
+ok(lastStatus:find("unlocked") ~= nil, "race path completes: " .. lastStatus)
+
+--==================== extract flow: truncated push salvage ====================
+-- rows arrive but the END line never does: locate timeout must use them
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade5 = RowFor(1008)
+ctrlDown = true
+blade5._scripts["OnClick"](blade5, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()            -- pin slot; cache empty -> locate + requests
+local tSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1008 then tSlot = slot end
+end
+feed("ICITEM:B:0:" .. tSlot)
+feed("ICIPROC:888:2:15:0")
+-- no ICINVEND ever arrives
+clock = clock + 6.1; tick()            -- locate timeout
+local exd4 = _G["ProcHunterExtractDialog"]
+ok(exd4._shown == true, "timeout salvaged the cached rows into the dialog")
+exd4.cancelBtn._scripts["OnClick"]()
+
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
     ok(sent[i].msg == "VLTGET" or sent[i].msg == "ICCOLL"
