@@ -1,0 +1,42 @@
+ProcHunter — Changelog
+======================
+
+v1.0.0 (2026-09-11)
+-------------------
+Initial release.
+
+- Scans the Uncapped Vault and lists every item that is equippable by
+  anyone (weapons and armor, including rings/trinkets/necks/cloaks/
+  shields/relics; class and level restrictions deliberately ignored)
+  AND carries an effect spell found in the bundled proc database.
+- Bundled database: item -> proc mapping generated from the 3.3.5a
+  item_template plus Spell/ItemSet DBCs (the SchoolPop ProcDB data,
+  renamed into the ProcHunter namespace), plus the drop-source table.
+  Fully standalone — no other addon required.
+- Read-only on the wire: the only message ever sent is VLTGET, the
+  same snapshot request the Dashboard's Vault tab sends. ProcHunter
+  never deposits, withdraws, consumes or modifies anything.
+- Live: VLTUPD/VLTROWUPD pushes from the server mark the list stale
+  and it re-pulls (debounced) while the window is open. Snapshots
+  streamed for other addons (e.g. opening the Dashboard vault tab)
+  are absorbed for free.
+- Window: draggable (position saved), Escape closes, Refresh button,
+  live text filter matching item names and proc names, rows show
+  icon / item level / quality-colored name with stack count / proc
+  names; hovering a row shows the full item tooltip plus the proc
+  list with spell IDs and drop sources.
+- Uncached items are primed via a hidden tooltip and retried once per
+  second (up to 20 tries); a "waiting on item cache" counter shows
+  progress.
+- Slash commands: /prochunter and /ph.
+- Only chat output is the login stamp.
+
+Known limitations (v1.0.0):
+- The database is name-matched and generated from stock 3.3.5a data:
+  custom Uncapped items whose names are not in it will not be flagged.
+- Proc chance and imprinted (SoulForge) procs on specific vault copies
+  cannot be shown — the vault wire stream carries no proc data and no
+  server verb exposes it for vault items.
+- The database does not distinguish chance-on-hit procs from on-use or
+  on-equip effects, so use-effect trinkets and similar items are
+  listed too.
