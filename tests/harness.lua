@@ -12,6 +12,25 @@ strsub = string.sub
 strtrim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 local shiftDown = false
 function IsShiftKeyDown() return shiftDown end
+local ctrlDown = false
+function IsControlKeyDown() return ctrlDown end
+
+-- bags: bagContents[bag][slot] = entry (0 = empty)
+local bagContents = { [0] = {}, [1] = {}, [2] = {}, [3] = {}, [4] = {} }
+function GetContainerNumSlots(bag) return bagContents[bag] and 16 or 0 end
+function GetContainerItemLink(bag, slot)
+    local e = bagContents[bag] and bagContents[bag][slot]
+    if e and e > 0 then return "item:" .. e .. ":0" end
+    return nil
+end
+local function BagPlace(e)
+    for slot = 1, 16 do
+        if not bagContents[0][slot] or bagContents[0][slot] == 0 then
+            bagContents[0][slot] = e
+            return slot
+        end
+    end
+end
 local optCategories = {}
 function InterfaceOptions_AddCategory(p) optCategories[#optCategories+1] = p end
 
@@ -369,6 +388,7 @@ UncappedVault.Withdraw = function(row, c) -- pinned signature: (rowTable, count)
         if UncappedVault.items[i] == row then
             row.stackCount = (row.stackCount or 1) - c
             if row.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+            for k = 1, c do BagPlace(row.itemId or row.e) end
             return
         end
     end
@@ -425,6 +445,7 @@ UncappedVault.Withdraw = function(row, c) -- pinned signature, count honored
         if UncappedVault.items[i] == row then
             row.stackCount = (row.stackCount or 1) - c
             if row.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+            for k = 1, c do BagPlace(row.itemId or row.e) end
             return
         end
     end
@@ -470,11 +491,120 @@ ok(lastStatus:find("2 of 4") ~= nil and lastStatus:find("stopped") ~= nil,
     "partial withdrawal reported honestly: " .. lastStatus)
 ok(RowFor(1006) and RowFor(1006).data.count == 2, "ring stack reduced 4 -> 2")
 
+--==================== extract flow: happy path ====================
+-- restore a well-behaved Withdraw (the partial test left a budget wrapper)
+UncappedVault.Withdraw = function(row, c)
+    c = math.min(c or 1, row.stackCount or 1)
+    for i = #UncappedVault.items, 1, -1 do
+        if UncappedVault.items[i] == row then
+            row.stackCount = (row.stackCount or 1) - c
+            if row.stackCount <= 0 then table.remove(UncappedVault.items, i) end
+            for k = 1, c do BagPlace(row.itemId or row.e) end
+            return
+        end
+    end
+end
+local axe = RowFor(1010)
+ok(axe ~= nil, "dual axe row present for extract test")
+ctrlDown = true
+axe._scripts["OnClick"](axe, "RightButton")
+ctrlDown = false
+ok(lastStatus:find("extracting") ~= nil, "extract flow started: " .. lastStatus)
+clock = clock + 1.6; tick() -- withdraw verifies; copy found; ICEXSRC out
+local sawExsrc = false
+for i = 1, #sent do if sent[i].msg == "ICEXSRC" then sawExsrc = true end end
+ok(sawExsrc, "ICEXSRC requested after the copy landed")
+-- the copy landed in bag 0; find its slot for the feed
+local axeSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1010 then axeSlot = slot end
+end
+ok(axeSlot ~= nil, "withdrawn copy present in bags")
+feed("ICEXI:0:" .. axeSlot .. ":1010:0:555:2")
+feed("ICEXI:0:" .. axeSlot .. ":1010:0:556:2")
+feed("ICEXIEND:")
+local exd = _G["ProcHunterExtractDialog"]
+ok(exd ~= nil and exd._shown == true, "consent dialog opened on ICEXIEND")
+-- Fire Burst (555) is already unlocked; Ice Burst (556) must be the default
+local ownedRow, chosenRow
+for i = 1, 6 do
+    local pr = exd.rows[i]
+    if pr and pr.row then
+        if pr.row.spell == 555 then ownedRow = pr end
+        if pr.row.spell == 556 then chosenRow = pr end
+    end
+end
+ok(ownedRow and ownedRow.txt._text:find("already unlocked") ~= nil,
+    "owned proc marked and greyed")
+ok(chosenRow and chosenRow.txt._text:find("33ff99") ~= nil,
+    "unowned proc is the default selection")
+local sentBeforeUnlock = #sent
+exd.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg == ("ICUNLOCK:0:" .. axeSlot .. ":556:2"),
+    "ICUNLOCK carries the exact bag/slot/spell/trigger")
+feed("ICUNLOCKED:556:2")
+ok(lastStatus:find("unlocked: Ice Burst") ~= nil,
+    "success flash: " .. lastStatus)
+ok(RowFor(1010) == nil,
+    "axe left the vault list — its only copy was withdrawn by the flow")
+
+--==================== extract flow: no-proc abort ====================
+local ring2 = RowFor(1006)
+ok(ring2 ~= nil, "ring row present for abort test")
+ctrlDown = true
+ring2._scripts["OnClick"](ring2, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local ringSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1006 then ringSlot = slot end
+end
+ok(ringSlot ~= nil, "ring copy landed in bags")
+feed("ICEXI:0:" .. ringSlot .. ":1006:0:0:0")
+feed("ICEXIEND:")
+ok(lastStatus:find("extract aborted") ~= nil
+    and lastStatus:find("no extractable proc") ~= nil,
+    "no-proc abort surfaced: " .. lastStatus)
+ok(_G["ProcHunterExtractDialog"]._shown == false,
+    "dialog stays closed on abort")
+
+--==================== extract flow: cancel is safe ====================
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1008, itemId = 1008, stackCount = 1 }
+clock = clock + 2.1; tick()
+local blade2 = RowFor(1008)
+ok(blade2 ~= nil, "blade back for cancel test")
+ctrlDown = true
+blade2._scripts["OnClick"](blade2, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local bladeSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1008 then bladeSlot = slot end
+end
+feed("ICEXI:0:" .. bladeSlot .. ":1008:0:888:2")
+feed("ICEXIEND:")
+local before2 = #sent
+exd.cancelBtn._scripts["OnClick"]()
+ok(#sent == before2 and exd._shown == false,
+    "cancel sends nothing and closes the dialog")
+ok(lastStatus:find("stays in your bags") ~= nil,
+    "cancel reason surfaced: " .. lastStatus)
+
+-- a Dashboard-style unlock arriving from outside flips ticks live
+-- (the ring is still IN the vault; the blade left it via its own withdraw)
+feed("ICUNLOCKED:400:0")
+local ringTick2 = RowFor(1006) and RowFor(1006).tick
+ok(ringTick2 and ringTick2._shown == true and ringTick2._vg == 1,
+    "absorbed external unlock turned the ring tick green live")
+
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
     ok(sent[i].msg == "VLTGET" or sent[i].msg == "ICCOLL"
-        or sent[i].msg:find("^VLTWD:") ~= nil,
-        "wire send #" .. i .. " is VLTGET, ICCOLL or VLTWD only")
+        or sent[i].msg == "ICEXSRC"
+        or sent[i].msg:find("^VLTWD:") ~= nil
+        or sent[i].msg:find("^ICUNLOCK:") ~= nil,
+        "wire send #" .. i .. " is a known verb")
 end
 local chatBefore = #chat
 SlashCmdList["PROCHUNTER"]("debug")
