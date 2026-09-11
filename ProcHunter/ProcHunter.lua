@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.5.0 — Uncapped Vault proc scanner
+-- ProcHunter v1.5.2 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.5.0"
+local VERSION = "1.5.2"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -467,6 +467,7 @@ end
 
 local function DumpVault()
     local UV = _G.UncappedVault
+    Msg("dump: ProcHunter v" .. VERSION)
     Msg("dump: UncappedVault is " .. type(UV))
     Msg("dump: remembered withdraw route: " .. tostring(db and db.wdRoute))
     if type(UV) ~= "table" then return end
@@ -600,16 +601,31 @@ local function FindNewCopy(snap, e)
     end
 end
 
--- both wire dialects feed rows through here; dedupe guards the case
--- of a realm answering both ICEXSRC and ICINV for the same copy
-local function AddExRow(w, sp, tr)
+-- The live realm PUSHES the ICINV stream the instant the withdrawn
+-- copy lands — before the bag diff has even pinned the slot. So every
+-- proc row is cached per bag:slot bucket for the whole life of the
+-- flow, whatever the stage; once the slot is pinned, a cache hit goes
+-- straight to the dialog and no request is ever needed. Old-pack
+-- realms that answer our explicit request still work: their rows land
+-- in the same buckets and resolve at ICEXIEND/ICINVEND.
+local function AddExRow(w, key, sp, tr)
     tr = tr or 0
-    w.seen = w.seen or {}
+    w.cache = w.cache or {}
+    local b = w.cache[key]
+    if not b then b = {} w.cache[key] = b end
     local k = sp .. ":" .. tr
-    if w.seen[k] then return end
-    w.seen[k] = true
-    w.rows = w.rows or {}
-    w.rows[#w.rows + 1] = { spell = sp, trigger = tr }
+    if b[k] then return end -- dedupe (dual-dialect realms)
+    b[k] = true
+    b[#b + 1] = { spell = sp, trigger = tr }
+end
+
+-- terminal for the locate stage: resolve the pinned bucket
+local function ResolveExRows(w)
+    local b = w.cache and w.cache[w.bag .. ":" .. w.slot]
+    if b and #b > 0 then
+        w.rows = b
+        return true
+    end
 end
 
 local function AbortExtract(reason)
@@ -665,21 +681,36 @@ local function ExtractTick(now)
         local bag, slot = FindNewCopy(w.snap, w.e)
         if bag then
             w.bag, w.slot = bag, slot
-            w.stage = "locate"
-            w.at = now
-            -- both dialects requested; whichever the realm speaks, we hear.
-            -- Old pack answers ICEXSRC with ICEXI rows; the live realm
-            -- ignores it and answers ICINV with ICITEM/ICIPROC instead.
-            SendAddonMessage(SEND_PREFIX, "ICEXSRC", "WHISPER",
-                UnitName("player"))
-            SendAddonMessage(SEND_PREFIX, "ICINV", "WHISPER",
-                UnitName("player"))
+            if ResolveExRows(w) then
+                -- the realm already pushed this copy's procs while the
+                -- bag diff was still running — no request needed
+                w.stage = "dialog"
+                w.at = now
+                if ShowExtractDialog then ShowExtractDialog() end
+            else
+                w.stage = "locate"
+                w.at = now
+                -- both dialects requested; whichever the realm speaks,
+                -- we hear. Old pack answers ICEXSRC with ICEXI rows;
+                -- some realms only push ICINV on an explicit ask.
+                SendAddonMessage(SEND_PREFIX, "ICEXSRC", "WHISPER",
+                    UnitName("player"))
+                SendAddonMessage(SEND_PREFIX, "ICINV", "WHISPER",
+                    UnitName("player"))
+            end
         elseif now - w.at > 8 then
             AbortExtract("the withdrawn copy never reached your bags")
         end
     elseif w.stage == "locate" then
         if now - w.at > 6 then
-            AbortExtract("no answer from the extraction picker")
+            if ResolveExRows(w) then
+                -- rows arrived but the END line never did — use them
+                w.stage = "dialog"
+                w.at = now
+                if ShowExtractDialog then ShowExtractDialog() end
+            else
+                AbortExtract("no answer from the extraction picker")
+            end
         end
     elseif w.stage == "unlock" then
         if now - w.at > 6 then
@@ -855,43 +886,50 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
     elseif find(msg, "^VLTEND:") or msg == "VLTEND" then
         CommitSnapshot("wire")
     elseif find(msg, "^ICEXI:") then
-        if exFlow and exFlow.stage == "locate" then
+        -- old-pack dialect. Cached at ANY stage; filtered by entry
+        -- (bag/slot re-checked at resolve time via the bucket key)
+        if exFlow then
             local b, sl, en, eq, sp, tr = match(msg,
                 "^ICEXI:(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)$")
-            if b and tonumber(b) == exFlow.bag
-                and tonumber(sl) == exFlow.slot
-                and tonumber(en) == exFlow.e
-                and tonumber(sp) > 0 then
-                AddExRow(exFlow, tonumber(sp), tonumber(tr))
+            if b and tonumber(en) == exFlow.e and tonumber(sp) > 0 then
+                AddExRow(exFlow, tonumber(b) .. ":" .. tonumber(sl),
+                    tonumber(sp), tonumber(tr))
             end
         end
     elseif find(msg, "^ICITEM:") then
         -- live-realm ICINV dialect: an ICITEM header announces which
-        -- item the ICIPROC rows that follow belong to. Only a B (bag)
-        -- header for OUR pinned bag/slot opens the gate; any other
-        -- header (equipped gear, other slots) closes it.
-        if exFlow and exFlow.stage == "locate" then
+        -- item the ICIPROC rows that follow belong to. Only B (bag)
+        -- headers open a bucket; equipped-gear headers close it. The
+        -- stream is cached at ANY stage — the realm pushes it the
+        -- moment the copy lands, before the slot is even pinned.
+        if exFlow then
             local b, sl = match(msg, "^ICITEM:B:(%d+):(%d+)")
-            exFlow.inHdr = (b ~= nil
-                and tonumber(b) == exFlow.bag
-                and tonumber(sl) == exFlow.slot) or nil
+            exFlow.curKey = b and (tonumber(b) .. ":" .. tonumber(sl))
+                or nil
         end
     elseif find(msg, "^ICIPROC:") then
         -- ICIPROCBP/ICIPROCFACT/ICIPROCSRC lack the colon there: no match
-        if exFlow and exFlow.stage == "locate" and exFlow.inHdr then
+        if exFlow and exFlow.curKey then
             local sp, tr = match(msg, "^ICIPROC:(%d+):(%d+)")
             if sp and tonumber(sp) > 0 then
-                AddExRow(exFlow, tonumber(sp), tonumber(tr))
+                AddExRow(exFlow, exFlow.curKey,
+                    tonumber(sp), tonumber(tr))
             end
         end
     elseif find(msg, "^ICEXIEND") or find(msg, "^ICINVEND") then
-        if exFlow and exFlow.stage == "locate" then
-            if exFlow.rows and #exFlow.rows > 0 then
-                exFlow.stage = "dialog"
-                exFlow.at = GetTime()
-                if ShowExtractDialog then ShowExtractDialog() end
-            else
-                AbortExtract("the server reports no extractable proc on this copy")
+        if exFlow then
+            exFlow.curKey = nil
+            -- terminal only for the locate stage. An END arriving
+            -- during withdraw just closes the pushed cache — never
+            -- an abort (the slot is not even pinned yet).
+            if exFlow.stage == "locate" then
+                if ResolveExRows(exFlow) then
+                    exFlow.stage = "dialog"
+                    exFlow.at = GetTime()
+                    if ShowExtractDialog then ShowExtractDialog() end
+                else
+                    AbortExtract("the server reports no extractable proc on this copy")
+                end
             end
         end
     elseif find(msg, "^ICUNLOCKED:") then
@@ -1054,7 +1092,7 @@ local function BuildUI()
 
     local title = ui:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -14)
-    title:SetText("|cff33ff99ProcHunter|r — vault items with procs")
+    title:SetText("|cff33ff99ProcHunter|r v" .. VERSION .. " — vault items with procs")
 
     local close = CreateFrame("Button", nil, ui, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -4, -4)
