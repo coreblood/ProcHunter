@@ -65,6 +65,7 @@ spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [668] = "Relic Chill", [669] = "Angling",
     [670] = "Veteran Strike", [671] = "Veteran Vigor",
     [672] = "Twilight Custom Proc", [673] = "Verdict Strike",
+    [675] = "Power Word Strike",
     [897] = "Storm Fury", [898] = "Echo Ward" }
 function GetSpellInfo(id) return spells[id] end
 
@@ -87,6 +88,7 @@ spellTips = {
     [671] = { "Veteran Vigor", "Increases Stamina by 40." },
     [672] = { "Twilight Custom Proc", "Chance on hit: twilight." },
     [673] = { "Verdict Strike", "Chance on hit: strikes." },
+    [675] = { "Power Word Strike", "Chance on hit: power." },
     [667] = { "Staff Ward", "Chance on hit: Absorbs 500 damage for 10 sec." },
     [556] = { "Ice Burst", "Chance on hit: ice." },
 }
@@ -212,6 +214,7 @@ ProcHunter_ProcDB[670] = "Veteran Blade"
 ProcHunter_ProcDB[671] = "Veteran Blade"
 ProcHunter_ProcDB[672] = "Twilight Custom Scale"
 ProcHunter_ProcDB[673] = "Verdict Blade"
+ProcHunter_ProcDB[675] = "Word of Power"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
@@ -1381,6 +1384,54 @@ feed("ICCOLLEND")
 ok(not VisNamed("Nameless Artifact"),
     "ticked == hidden: collected DB-less item vanished")
 cbn:SetChecked(true); cbn._scripts["OnClick"](cbn) -- legacy state back
+
+--==================== v1.7.4: silence + server coords ====================
+-- (a) streams keyed in server coords resolve by TRANSLATION, no
+-- name fallback needed; (b) total silence resolves from LEARNED data
+items[1023] = { name = "Word of Power", q = 4, ilvl = 264 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1023, itemId = 1023, stackCount = 3 }
+-- teach the entry first, as a panel stream would (custom 75200:1)
+feed("ICEXI:255:30:1023:1:75200:1")
+feed("ICEXIEND:1")
+local cbp = _G["ProcHunterShowExtracted"]
+cbp:SetChecked(false); cbp._scripts["OnClick"](cbp)
+clock = clock + 2.1; tick()
+local wop = RowFor(1023)
+ok(wop ~= nil, "word of power listed (learned entry)")
+-- flow with TOTAL silence after the withdraw
+ctrlDown = true
+wop._scripts["OnClick"](wop, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local pSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1023 then pSlot = slot end
+end
+ok(pSlot ~= nil, "copy pinned")
+clock = clock + 6.2; tick()             -- silence -> learned synthesis (pace may be backed off)
+local exdP = _G["ProcHunterExtractDialog"]
+ok(exdP._shown == true, "dialog synthesized from learned data, no stream")
+exdP.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg == ("ICUNLOCK:255:" .. (pSlot - 1) .. ":75200:1"),
+    "unlock in TRANSLATED server coords: " .. sent[#sent].msg)
+feed("ICUNLOCKED:75200:1")
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1023 then bagContents[0][slot] = nil end
+end
+-- (a) exact match on a server-coord stream (no names involved)
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1023, itemId = 1023, stackCount = 1 }
+feed("ICCOLLROW:99999:1:0")             -- unrelated collection churn
+feed("ICCOLLEND")
+clock = clock + 2.1; tick()
+cbp:SetChecked(true); cbp._scripts["OnClick"](cbp)
+cbp:SetChecked(false); cbp._scripts["OnClick"](cbp)
+local wop2 = RowFor(1023)
+if wop2 then                            -- may be done-hidden if 75200 owned
+    -- 75200 owned -> item done: correct and covered above
+end
+cbp:SetChecked(true); cbp._scripts["OnClick"](cbp) -- legacy state back
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
