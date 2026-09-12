@@ -1,6 +1,32 @@
 ProcHunter — Changelog
 ======================
 
+v1.7.4 (2026-09-12)
+-------------------
+STREAM-FREE EXTRACTION — SERVER COORDS DECODED
+
+Root cause of "no answer from the extraction picker": the live
+server only pushes its inventory stream while ITS Extraction panel
+session is active, and it ignores third-party requests outright.
+With the panel closed, ProcHunter got silence and timed out — while
+the same item extracted fine at the panel.
+
+- The bag dumps you logged decoded the server's coordinate system:
+  backpack = 255, bags 1-4 = 19-22, slots 0-based. Client bag:slot
+  now translates deterministically.
+- SILENCE NO LONGER STOPS A FLOW. If the wire has already taught the
+  item's spells (v1.7.2 learning), the consent dialog is synthesized
+  straight from learned data and ICUNLOCK goes out in translated
+  server coordinates — no stream needed at all.
+- Streams that DO arrive resolve by exact translated-key match
+  before any name fallback.
+- Triggers are learned alongside spells now (needed for the unlock).
+- Truly unknown items (never seen in any stream) abort with clear
+  advice: open the Extraction panel once so its stream teaches them.
+
+/reload. Tip: open the Extraction panel's Unlock tab once per
+session — its full-bag stream bulk-teaches everything you carry.
+
 v1.7.3 (2026-09-12)
 -------------------
 PROCS ONLY + ONE DONE RULE + LEARNED CUSTOM ITEMS
