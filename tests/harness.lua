@@ -58,7 +58,9 @@ local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [777] = "Crit Aura", [555] = "Fire Burst", [556] = "Ice Burst",
     [890] = "Enrage", [701] = "Stone Skin",
     [660] = "Warp Strike", [662] = "Sharp Edge",
-    [663] = "Teleport: Ironforge", [664] = "Rune Power" }
+    [663] = "Teleport: Ironforge", [664] = "Rune Power",
+    [666] = "Summon Portal", [667] = "Staff Ward",
+    [892] = "Enrage", [893] = "Enrage" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
@@ -73,6 +75,8 @@ local spellTips = {
     [662] = { "Sharp Edge", "Increases your attack power by 100 for 10 sec." },
     [663] = { "Teleport: Ironforge", "Teleports you to Ironforge." },
     [664] = { "Rune Power", "Chance on spell hit: Restores mana over 8 sec... deals 50 damage." },
+    [666] = { "Summon Portal", "Creates a portal to Karazhan." },
+    [667] = { "Staff Ward", "Chance on hit: Absorbs 500 damage for 10 sec." },
     [556] = { "Ice Burst", "Chance on hit: ice." },
 }
 
@@ -187,6 +191,8 @@ ProcHunter_ProcDB[660] = "Warp Blade"
 ProcHunter_ProcDB[662] = "Warp Blade"
 ProcHunter_ProcDB[663] = "Portal Rod"
 ProcHunter_ProcDB[664] = "Rune Rod"
+ProcHunter_ProcDB[666] = "Portal Staff"
+ProcHunter_ProcDB[667] = "Portal Staff"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
@@ -737,7 +743,7 @@ for slot = 1, 16 do
     if bagContents[0][slot] == 1008 then tSlot = slot end
 end
 feed("ICITEM:B:0:" .. tSlot)
-feed("ICIPROC:888:2:15:0")
+feed("ICIPROC:892:2:15:0")
 -- no ICINVEND ever arrives
 clock = clock + 6.1; tick()            -- locate timeout
 local exd4 = _G["ProcHunterExtractDialog"]
@@ -824,7 +830,7 @@ for slot = 1, 16 do
     if bagContents[0][slot] == 1008 then tSlot2 = slot end
 end
 feed("ICITEM:B:0:" .. tSlot2)
-feed("ICIPROC:890:2:15:0")
+feed("ICIPROC:893:2:15:0")
 feed("ICINVEND")
 clock = clock + 0.1; tick()
 local exd6 = _G["ProcHunterExtractDialog"]
@@ -833,7 +839,7 @@ ok(exd6.okBtn._text == "Destroy & Learn",
     "button text has a single ampersand: " .. tostring(exd6.okBtn._text))
 local r1 = exd6.rows[1]
 r1._scripts["OnEnter"](r1)
-ok(GameTooltip._hyperlink == "spell:890",
+ok(GameTooltip._hyperlink == "spell:893",
     "hover sets the spell tooltip: " .. tostring(GameTooltip._hyperlink))
 ok(GameTooltip._shown == true, "tooltip shown on enter")
 r1._scripts["OnLeave"](r1)
@@ -943,10 +949,69 @@ end
 ok(doneMsg ~= nil and doneMsg:find("1 proc learned") ~= nil,
     "finish report: " .. tostring(doneMsg))
 
+--==================== portal procs + auto-redeposit ====================
+items[1014] = { name = "Portal Staff", q = 4, ilvl = 230 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1014, itemId = 1014, stackCount = 2 }
+clock = clock + 2.1; tick()
+local staff = RowFor(1014)
+ok(staff ~= nil, "portal staff listed")
+ok(staff.data.extT == 1,
+    "portal proc excluded from tick math (extT=" .. staff.data.extT .. ")")
+-- nothing-learnable copy goes STRAIGHT back: withdraw Warp Blade
+-- (660 tele, 662 owned) — no dialog, VLTDEP sent
+local wb2 = RowFor(1011)
+ctrlDown = true
+wb2._scripts["OnClick"](wb2, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local wSlot2
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1011 then wSlot2 = slot end
+end
+ok(wSlot2 ~= nil, "warp blade copy landed")
+local exdN = _G["ProcHunterExtractDialog"]
+feed("ICITEM:B:0:" .. wSlot2)
+feed("ICIPROC:660:1:20:0")             -- teleport
+feed("ICIPROC:662:1:20:0")             -- owned
+feed("ICINVEND")
+ok(exdN._shown == false, "no dialog when nothing is learnable")
+ok(sent[#sent].msg == ("VLTDEP:0:" .. wSlot2),
+    "unextractable copy redeposited: " .. sent[#sent].msg)
+ok(lastStatus:find("returned to the vault") ~= nil,
+    "status says it went back: " .. lastStatus)
+-- cancel still KEEPS the copy: portal staff flow, cancel at dialog
+ctrlDown = true
+staff._scripts["OnClick"](staff, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local sSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1014 then sSlot = slot end
+end
+feed("ICITEM:B:0:" .. sSlot)
+feed("ICIPROC:666:1:10:0")             -- portal: greyed
+feed("ICIPROC:667:1:10:0")             -- learnable
+feed("ICINVEND")
+ok(exdN._shown == true, "staff dialog open (667 learnable)")
+local portalRow
+for i = 1, 6 do
+    if exdN.rows[i].row and exdN.rows[i].row.spell == 666 then
+        portalRow = exdN.rows[i]
+    end
+end
+ok(portalRow and portalRow.txt._text:find("cannot be extracted") ~= nil,
+    "portal proc greyed like a teleport")
+local sentBefore = #sent
+exdN.cancelBtn._scripts["OnClick"]()
+ok(#sent == sentBefore, "cancel sends nothing — copy stays in bags")
+ok(bagContents[0][sSlot] == 1014, "cancelled copy still in bags")
+
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
     ok(sent[i].msg == "VLTGET" or sent[i].msg == "ICCOLL"
         or sent[i].msg == "ICEXSRC" or sent[i].msg == "ICINV"
+        or sent[i].msg:find("^VLTDEP:") ~= nil
         or sent[i].msg:find("^VLTWD:") ~= nil
         or sent[i].msg:find("^ICUNLOCK:") ~= nil,
         "wire send #" .. i .. " is a known verb")
