@@ -1,6 +1,26 @@
 ProcHunter — Changelog
 ======================
 
+v1.6.0 (2026-09-11)
+-------------------
+EXTRACT ALL + TELEPORT RULE
+
+- New "Extract All" button next to Refresh. One consent dialog, then
+  an unattended run: per item — withdraw one copy, learn its first
+  still-locked proc, repeat until the item is fully green, next item.
+  One vault copy is destroyed per proc learned. Paced ~2.5s between
+  flows for the server throttle. The button turns into Stop; pressing
+  it ends the run after the current item. Failed flows skip the item
+  and the run continues; every skip is reported in chat with a reason
+  at the end. Items with copies already in your bags are skipped
+  (single-copy safety rule) — deposit them and rerun.
+- Server rule honored: TELEPORT procs cannot be extracted. Greyed in
+  the Destroy & Learn dialog with the reason, never auto-picked,
+  skipped by Extract All, and excluded from the green-tick math — an
+  item whose only proc teleports needs nothing extracted.
+
+/reload suffices.
+
 v1.5.4 (2026-09-11)
 -------------------
 DIALOG & STATUS POLISH
