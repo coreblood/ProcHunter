@@ -1,6 +1,29 @@
 ProcHunter — Changelog
 ======================
 
+v1.7.5 (2026-09-12)
+-------------------
+TICKED = UNTOUCHABLE (HARD INVARIANT) + TWO REAL FIXES IT FLUSHED OUT
+
+- Ticked items can no longer be withdrawn by ANY code path. Three
+  layers: the Extract All queue excludes done items, the runner
+  re-checks done with fresh data immediately before each withdraw,
+  and StartExtract itself refuses a done item outright — a manual
+  Ctrl+Right-click on a ticked item now declines with "already fully
+  extracted" instead of burning a copy.
+- Extract All announces its skips at start: "N items to work through
+  (M already done, skipped)" — the invariant is visible working.
+- Flushed out while hardening: (1) the vault-change signature was a
+  weak additive sum, so equal-count mutations (one item out, another
+  in, between polls) could collide and silently skip the list
+  rebuild — replaced with a collision-resistant hash; (2) items fed
+  from the UncappedVault global could carry no item level and sank
+  to the bottom of the sort, sometimes past the drawn rows — item
+  level and quality now fall back to the client's item cache.
+
+/reload suffices. Historic extractions teach themselves from the
+collection stream on any Refresh; no panel visit needed.
+
 v1.7.4 (2026-09-12)
 -------------------
 STREAM-FREE EXTRACTION — SERVER COORDS DECODED
