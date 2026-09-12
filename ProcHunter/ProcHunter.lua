@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.6.2 — Uncapped Vault proc scanner
+-- ProcHunter v1.6.3 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.6.2"
+local VERSION = "1.6.3"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -362,14 +362,22 @@ local function Rebuild()
                                 if got then extN = extN + 1 end
                             end
                         end
-                        matched[#matched + 1] = {
-                            e = row.e, rp = row.rp, count = row.count,
-                            q = row.q, ilvl = row.ilvl,
-                            name = dispName, link = link,
-                            procs = procs, flats = flats,
-                            spells = (#procs > 0) and procs or flats,
-                            extN = extN, extT = extT,
-                        }
+                        -- fully-extracted items hide by default:
+                        -- nothing left to do with them. The "show
+                        -- extracted" tickbox brings them back.
+                        local allDone = extT > 0 and extN == extT
+                        if allDone and not db.showExtracted then
+                            -- hidden, but still counted above
+                        else
+                            matched[#matched + 1] = {
+                                e = row.e, rp = row.rp, count = row.count,
+                                q = row.q, ilvl = row.ilvl,
+                                name = dispName, link = link,
+                                procs = procs, flats = flats,
+                                spells = (#procs > 0) and procs or flats,
+                                extN = extN, extT = extT,
+                            }
+                        end
                     end
                 end
             end
@@ -909,6 +917,19 @@ local function StartRunAll()
         #queue, #queue == 1 and "" or "s"))
 end
 
+StaticPopupDialogs["PROCHUNTER_DEPALL"] = {
+    text = "Deposit EVERYTHING depositable from your bags into the " ..
+        "vault?\n\nThe server decides what qualifies — equipped gear " ..
+        "and non-vault items stay untouched.",
+    button1 = "Deposit",
+    button2 = "Cancel",
+    OnAccept = function()
+        SendAddonMessage(SEND_PREFIX, "VLTDEPALL", "WHISPER",
+            UnitName("player"))
+    end,
+    timeout = 0, whileDead = 1, hideOnEscape = 1,
+}
+
 StaticPopupDialogs["PROCHUNTER_EXTRACTALL"] = {
     text = "Extract ALL missing procs?\n\nThis withdraws and DESTROYS " ..
         "one vault copy per proc learned, item after item, until " ..
@@ -1411,14 +1432,35 @@ local function BuildUI()
     end)
     ui.extractAll = exAll
 
+    local depAll = CreateFrame("Button", nil, ui, "UIPanelButtonTemplate")
+    depAll:SetWidth(96); depAll:SetHeight(20)
+    depAll:SetPoint("LEFT", exAll, "RIGHT", 6, 0)
+    depAll:SetText("Deposit Bags")
+    depAll:SetScript("OnClick", function()
+        StaticPopup_Show("PROCHUNTER_DEPALL")
+    end)
+    ui.depositAll = depAll
+
     local filterLabel = ui:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    filterLabel:SetPoint("LEFT", exAll, "RIGHT", 14, 0)
+    filterLabel:SetPoint("LEFT", depAll, "RIGHT", 14, 0)
     filterLabel:SetText("Filter:")
 
     local filter = CreateFrame("EditBox", "ProcHunterFilterBox", ui,
         "InputBoxTemplate")
     filter:SetWidth(180); filter:SetHeight(18)
     filter:SetPoint("LEFT", filterLabel, "RIGHT", 10, 0)
+
+    local showEx = CreateFrame("CheckButton", "ProcHunterShowExtracted",
+        ui, "UICheckButtonTemplate")
+    showEx:SetWidth(22); showEx:SetHeight(22)
+    showEx:SetPoint("LEFT", filter, "RIGHT", 12, 0)
+    _G["ProcHunterShowExtractedText"]:SetText("show extracted")
+    showEx:SetChecked(db and db.showExtracted and true or false)
+    showEx:SetScript("OnClick", function(self)
+        db.showExtracted = self:GetChecked() and true or false
+        Rebuild()
+    end)
+    ui.showExtracted = showEx
     filter:SetAutoFocus(false)
     filter:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     filter:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
@@ -2029,6 +2071,7 @@ init:SetScript("OnEvent", function(_, event, arg1)
         ProcHunterDB = ProcHunterDB or {}
         db = ProcHunterDB
         if db.hideFlat == nil then db.hideFlat = true end
+        if db.showExtracted == nil then db.showExtracted = false end
         if db.wdSchema ~= 2 then db.wdRoute = nil; db.wdSchema = 2 end
         if db.fontSize == nil then db.fontSize = 11 end
         if db.alpha == nil then db.alpha = 1 end
