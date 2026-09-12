@@ -1,6 +1,33 @@
 ProcHunter — Changelog
 ======================
 
+v1.7.2 (2026-09-12)
+-------------------
+CUSTOM SPELLS BRIDGED — ENTRY-KEYED LEARNING
+
+Root cause of the stubborn "finished items still listed / nothing
+left to learn" loop: the Uncapped server's custom spells (the whole
+Twilight Scale line and friends) have IDs the stock client cannot
+name — GetSpellInfo returns nothing. Names could never bridge the
+bundled DB's stock IDs to the server's custom IDs, so those items
+looked locked forever while every extraction correctly came back
+"nothing left".
+
+- The wire itself is now the bridge, keyed by ITEM ENTRY: every
+  ICEXI row (entry + spell) and every ICCOLLROW source field teaches
+  a persistent entry -> spell map. An entry whose known spells are
+  all in your collection is DONE: green tick, auto-hidden, never
+  queued — no names involved.
+- A "nothing left to learn" verdict from a real attempt marks the
+  entry done permanently. One wasted withdraw per item at absolute
+  worst, then never again.
+- Learning persists across sessions and grows on its own: every bag
+  scan the Dashboard or ProcHunter triggers feeds it.
+
+/reload, then open the SoulForge Collection tab once (or press
+Refresh) so a collection stream teaches the map — the phantom
+"locked" customs collapse to green and vanish.
+
 v1.7.1 (2026-09-12)
 -------------------
 HOTFIX — EXTRACTED ITEMS RE-OPENED BY PHANTOM AURAS
