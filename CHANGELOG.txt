@@ -1,6 +1,22 @@
 ProcHunter — Changelog
 ======================
 
+v1.6.3 (2026-09-11)
+-------------------
+AUTO-HIDE EXTRACTED + DEPOSIT BAGS
+
+- Fully-extracted items (every extractable proc name owned) are now
+  hidden from the list by default — nothing left to do with them.
+  A "show extracted" tickbox next to the filter brings them back;
+  the choice is remembered. Teleport-only items (nothing extractable
+  at all) stay visible.
+- New "Deposit Bags" button: one confirm, then a single VLTDEPALL —
+  the server-side bulk deposit. The server decides what qualifies;
+  equipped gear and non-vault items stay untouched. For when a long
+  session fills your inventory.
+
+/reload suffices.
+
 v1.6.2 (2026-09-11)
 -------------------
 DEPOSIT VERIFICATION + NAME-BASED OWNERSHIP
