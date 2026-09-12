@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.6.0 — Uncapped Vault proc scanner
+-- ProcHunter v1.6.1 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.6.0"
+local VERSION = "1.6.1"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -237,14 +237,19 @@ local function ClassifySpell(id)
     return c
 end
 
--- server rule: teleport procs can never be extracted. Judged by the
--- word appearing in the spell's name or tooltip text.
+-- server rule: teleport procs can never be extracted. That includes
+-- portal creators (Atiesh). Judged by either word appearing in the
+-- spell's name or tooltip text.
 local teleCache = {}
+local function TeleText(t)
+    t = lower(t)
+    return find(t, "teleport") or find(t, "portal")
+end
 local function IsTeleportSpell(id)
     local c = teleCache[id]
     if c ~= nil then return c end
     local nm = GetSpellInfo(id)
-    c = (nm and find(lower(nm), "teleport")) and true or false
+    c = (nm and TeleText(nm)) and true or false
     if not c then
         local tip = GetScanTip()
         tip:ClearLines()
@@ -252,7 +257,7 @@ local function IsTeleportSpell(id)
         for i = 1, tip:NumLines() or 0 do
             local fs = _G["ProcHunterScanTipTextLeft" .. i]
             local t = fs and fs:GetText()
-            if t and find(lower(t), "teleport") then c = true break end
+            if t and TeleText(t) then c = true break end
         end
     end
     teleCache[id] = c
@@ -701,9 +706,19 @@ local function ResolveExRows(w)
     return nil, "none"
 end
 
-local function AbortExtract(reason)
+local function AbortExtract(reason, keep)
+    local w = exFlow
     exFlow = nil
     exFailMsg = reason
+    if not keep and w and w.bag and BagEntry(w.bag, w.slot) == w.e then
+        -- an unextractable copy goes STRAIGHT back to the vault.
+        -- Client coords: the pinned slot is client-side truth, and
+        -- VLTDEP is the same client-coord pair the pack's own
+        -- drag-to-deposit sends.
+        SendAddonMessage(SEND_PREFIX, format("VLTDEP:%d:%d",
+            w.bag, w.slot), "WHISPER", UnitName("player"))
+        exFailMsg = reason .. " — copy returned to the vault"
+    end
     if runAll and runAll.idx <= #runAll.queue then
         -- unattended run: an aborted flow skips the item, never halts
         local q = runAll.queue[runAll.idx]
@@ -1685,7 +1700,7 @@ ShowExtractDialog = function()
         exDlg.cancelBtn:SetPoint("BOTTOMRIGHT", -16, 14)
         exDlg.cancelBtn:SetText("Cancel")
         exDlg.cancelBtn:SetScript("OnClick", function()
-            AbortExtract("cancelled — the item stays in your bags")
+            AbortExtract("cancelled — the item stays in your bags", true)
         end)
 
         exDlg:Hide() -- shown-by-default rule
@@ -1699,11 +1714,13 @@ ShowExtractDialog = function()
         r.tele = IsTeleportSpell(r.spell)
         if not r.owned and not r.tele then anyLearnable = true end
     end
+    if not anyLearnable then
+        -- nothing on this copy can be learned (owned or teleport):
+        -- it goes straight back, no dialog
+        return AbortExtract("nothing left to learn on this copy")
+    end
     if runAll then
         -- unattended run: choose and confirm without any UI
-        if not anyLearnable then
-            return AbortExtract("nothing learnable on this copy")
-        end
         w.chosen = nil
         for i = 1, #w.rows do
             local r = w.rows[i]
@@ -1720,15 +1737,9 @@ ShowExtractDialog = function()
     end
 
     exDlg.item:SetText(QualityHex(w.q) .. w.name .. "|r")
-    if anyLearnable then
-        exDlg.warn:SetText("|cffff4040This DESTROYS the withdrawn copy.|r" ..
-            "  One proc per copy.")
-        exDlg.okBtn:Enable()
-    else
-        exDlg.warn:SetText("|cff888888Every proc on this item is already " ..
-            "unlocked — nothing to learn. The copy stays in your bags.|r")
-        exDlg.okBtn:Disable()
-    end
+    exDlg.warn:SetText("|cffff4040This DESTROYS the withdrawn copy.|r" ..
+        "  One proc per copy.")
+    exDlg.okBtn:Enable()
     for i = 1, 6 do
         local pr = exDlg.rows[i]
         local r = w.rows[i]
