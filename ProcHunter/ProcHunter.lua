@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.7.4 — Uncapped Vault proc scanner
+-- ProcHunter v1.7.5 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.7.4"
+local VERSION = "1.7.5"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -462,9 +462,10 @@ local function Rebuild()
                             extT = (extT > 0) and extT or 1
                             extN = extT
                         end
+                        local iq, iil = select(3, GetItemInfo(row.e))
                         local m = {
                             e = row.e, rp = row.rp, count = row.count,
-                            q = row.q, ilvl = row.ilvl,
+                            q = row.q or iq, ilvl = row.ilvl or iil,
                             name = dispName, link = link,
                             procs = procs, flats = flats,
                             effects = effects,
@@ -615,12 +616,17 @@ local function RequestCollection()
 end
 
 local function StagingSig()
+    -- order-independent but collision-resistant: a plain additive sum
+    -- let swap-mutations (one row out, another in, same count) hash
+    -- equal and silently skip the rebuild
     local sig, n = 0, 0
     for _, row in pairs(staging) do
         n = n + 1
-        sig = sig + row.e * 31 + (row.rp or 0) * 7 + (row.count or 1)
+        local h = ((row.e * 8191 + (row.rp or 0) * 131
+            + (row.count or 1)) % 100003)
+        sig = (sig + h * h + h) % 4503599627370496
     end
-    return sig * 100000 + n
+    return sig .. ":" .. n
 end
 
 local function CommitSnapshot(source)
@@ -990,6 +996,14 @@ local ToggleLogFrame    -- forward (failure-log window)
 
 local function StartExtract(m)
     if pendingWD or exFlow then return end
+    if ItemDone(m) or ServerDone(m.e) then
+        -- TICKED = UNTOUCHABLE. Final gate: nothing may withdraw a
+        -- fully-extracted item, ever.
+        exDoneAt, exDoneName = nil, nil
+        exFailMsg = (m.name or "?") .. " is already fully extracted"
+        if RefreshList then RefreshList() end
+        return
+    end
     exFailMsg, exDoneAt, exDoneName = nil, nil, nil
     local exp = {}
     local sl = m.effects or m.spells or m.procs or {}
@@ -1153,22 +1167,25 @@ end
 
 local function StartRunAll()
     if runAll then return end
-    local queue = {}
+    local queue, doneN = {}, 0
     for i = 1, #allScan do
         local m = allScan[i]
-        if LockedExtractable(m) > 0 then
+        if ItemDone(m) or ServerDone(m.e) then
+            doneN = doneN + 1
+        elseif LockedExtractable(m) > 0 then
             queue[#queue + 1] = { e = m.e, rp = m.rp, name = m.name }
         end
     end
     if #queue == 0 then
-        Msg("extract all: nothing to learn — every extractable proc is already unlocked")
+        Msg(format("extract all: nothing to learn — %d item%s already done",
+            doneN, doneN == 1 and "" or "s"))
         return
     end
     runAll = { queue = queue, idx = 1, tries = 0, learned = 0,
         skipped = {}, wait = 0 }
     if ui and ui.extractAll then ui.extractAll:SetText("Stop") end
-    Msg(format("extract all: %d item%s to work through",
-        #queue, #queue == 1 and "" or "s"))
+    Msg(format("extract all: %d item%s to work through (%d already done, skipped)",
+        #queue, #queue == 1 and "" or "s", doneN))
 end
 
 StaticPopupDialogs["PROCHUNTER_DEPALL"] = {
