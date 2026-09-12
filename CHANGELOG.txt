@@ -1,6 +1,26 @@
 ProcHunter — Changelog
 ======================
 
+v1.6.1 (2026-09-11)
+-------------------
+PORTAL RULE + AUTO-REDEPOSIT
+
+- Portal procs (Atiesh-style "Creates a portal...") are now caught by
+  the unextractable rule alongside teleports: greyed in the dialog,
+  never auto-picked, skipped by Extract All, excluded from the tick.
+- Any flow that ends with an unextractable copy in your bags sends it
+  STRAIGHT back to the vault (VLTDEP, the pack's own deposit verb).
+  Covers: nothing left to learn, server refused, no proc reported,
+  locate timeout, and the several-copies abort. Your explicit Cancel
+  still keeps the copy in bags — that is a choice, not a failure.
+- A copy with nothing learnable no longer opens the dialog at all:
+  it goes back immediately with a status note.
+- Net effect with Extract All: a full run leaves your bags exactly as
+  it found them — the closest thing to extracting straight from the
+  vault the server allows (there is no vault-side extraction verb).
+
+/reload suffices.
+
 v1.6.0 (2026-09-11)
 -------------------
 EXTRACT ALL + TELEPORT RULE
