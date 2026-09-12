@@ -60,7 +60,9 @@ local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [660] = "Warp Strike", [662] = "Sharp Edge",
     [663] = "Teleport: Ironforge", [664] = "Rune Power",
     [666] = "Summon Portal", [667] = "Staff Ward",
-    [892] = "Enrage", [893] = "Enrage" }
+    [892] = "Raging Blow", [893] = "Fury Surge",
+    [895] = "Storm Fury", [896] = "Storm Fury",
+    [897] = "Storm Fury", [898] = "Echo Ward" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
@@ -193,6 +195,8 @@ ProcHunter_ProcDB[663] = "Portal Rod"
 ProcHunter_ProcDB[664] = "Rune Rod"
 ProcHunter_ProcDB[666] = "Portal Staff"
 ProcHunter_ProcDB[667] = "Portal Staff"
+ProcHunter_ProcDB[895] = "Storm Blade"
+ProcHunter_ProcDB[897] = "Storm Echo"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
@@ -605,6 +609,9 @@ ok(lastStatus:find("extract aborted") ~= nil
     "no-proc abort surfaced: " .. lastStatus)
 ok(_G["ProcHunterExtractDialog"]._shown == false,
     "dialog stays closed on abort")
+ok(sent[#sent].msg == ("VLTDEP:0:" .. ringSlot),
+    "no-proc copy auto-redeposited")
+bagContents[0][ringSlot] = nil          -- vault accepts the deposit
 
 --==================== extract flow: cancel is safe ====================
 UncappedVault.items[#UncappedVault.items + 1] =
@@ -779,33 +786,36 @@ for b = 0, 4 do
         end
     end
 end
--- retry with a clean bag: exactly one copy after the withdraw
+-- retry with a clean bag: exactly one copy after the withdraw.
+-- Storm Blade: fresh name so nothing is owned yet (name-based rule)
+items[1015] = { name = "Storm Blade", q = 4, ilvl = 240 }
 UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1008, itemId = 1008, stackCount = 1 }
+    { e = 1015, itemId = 1015, stackCount = 2 }
 clock = clock + 2.1; tick()
-local blade7 = RowFor(1008)
+local storm = RowFor(1015)
+ok(storm ~= nil, "storm blade listed")
 ctrlDown = true
-blade7._scripts["OnClick"](blade7, "RightButton")
+storm._scripts["OnClick"](storm, "RightButton")
 ctrlDown = false
 clock = clock + 1.6; tick()            -- pin; miss; locate + requests
 local cSlot
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1008 then cSlot = slot end
+    if bagContents[0][slot] == 1015 then cSlot = slot end
 end
 ok(cSlot ~= nil, "single clean copy in bags")
 feed("ICITEM:B:1:6")                   -- server's own numbering
-feed("ICIPROC:890:2:15:0")
+feed("ICIPROC:896:2:15:0")             -- Storm Fury rank variant
 feed("ICITEM:B:4:19")                  -- unrelated item, non-matching proc
 feed("ICIPROC:701:1:5:0")
 feed("ICINVEND")
 local exd5 = _G["ProcHunterExtractDialog"]
 ok(exd5._shown == true, "dialog opened via proc-name resolution")
-ok(exd5.rows[1].row.spell == 890, "rank-variant proc resolved")
+ok(exd5.rows[1].row.spell == 896, "rank-variant proc resolved")
 clock = clock + 1.6; tick()
 exd5.okBtn._scripts["OnClick"]()
-ok(sent[#sent].msg == "ICUNLOCK:1:6:890:2",
+ok(sent[#sent].msg == "ICUNLOCK:1:6:896:2",
     "ICUNLOCK echoes the SERVER's coords, not the client's")
-feed("ICUNLOCKED:890:2")
+feed("ICUNLOCKED:896:2")
 ok(lastStatus:find("unlocked") ~= nil,
     "server-numbering path completes: " .. lastStatus)
 
@@ -912,7 +922,7 @@ end
 -- own every non-tele proc except Rune Power via a collection stream,
 -- so the queue is deterministic: Rune Rod alone
 for _, sp in ipairs({100, 101, 300, 400, 555, 556, 777,
-        888, 889, 890, 662}) do
+        888, 889, 890, 892, 893, 895, 896, 662}) do
     feed("ICCOLLROW:" .. sp .. ":1:0")
 end
 feed("ICCOLLEND")
@@ -920,7 +930,7 @@ StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
 ok(_G["ProcHunterFrame"].extractAll._text == "Stop",
     "button flips to Stop while running")
 local rSlot2
-for _ = 1, 20 do                        -- runner walks the queue
+for _ = 1, 40 do                        -- runner walks the queue
     clock = clock + 0.4; tick()
     for slot = 1, 16 do
         if bagContents[0][slot] == 1012 then rSlot2 = slot end
@@ -938,8 +948,9 @@ feed("ICUNLOCKED:664:1")
 for slot = 1, 16 do                     -- server destroys the copy
     if bagContents[0][slot] == 1012 then bagContents[0][slot] = nil end
 end
-clock = clock + 2.6; tick()            -- pacing over: item now green -> advance
-clock = clock + 0.1; tick()            -- queue exhausted -> finish
+for _ = 1, 8 do                        -- pacing over: advance + finish
+    clock = clock + 2.6; tick()
+end
 ok(_G["ProcHunterFrame"].extractAll._text == "Extract All",
     "button back after the run")
 local doneMsg
@@ -1006,6 +1017,77 @@ local sentBefore = #sent
 exdN.cancelBtn._scripts["OnClick"]()
 ok(#sent == sentBefore, "cancel sends nothing — copy stays in bags")
 ok(bagContents[0][sSlot] == 1014, "cancelled copy still in bags")
+
+--==================== name-based ownership ====================
+-- server unlocked rank 897; the DB knows rank 895 (both "Storm Fury"):
+-- the item must show green and never be offered for extraction
+items[1016] = { name = "Storm Echo", q = 4, ilvl = 245 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1016, itemId = 1016, stackCount = 1 }
+clock = clock + 2.1; tick()
+local echo = RowFor(1016)
+ok(echo ~= nil, "storm echo listed")
+ok(echo.data.extN == echo.data.extT and echo.data.extT == 1,
+    "rank mismatch resolved by name: tick green (" ..
+    echo.data.extN .. "/" .. echo.data.extT .. ")")
+
+--==================== deposit retry + give-up ====================
+-- throttled vault: the first VLTDEP is eaten; the watcher must resend
+for b = 0, 4 do
+    for slot = 1, 16 do
+        if bagContents[b] and bagContents[b][slot] == 1011 then
+            bagContents[b][slot] = nil
+        end
+    end
+end
+local wb3 = RowFor(1011)
+local sentBase = #sent
+ctrlDown = true
+wb3._scripts["OnClick"](wb3, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local wSlot3
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1011 then wSlot3 = slot end
+end
+feed("ICITEM:B:0:" .. wSlot3)
+feed("ICIPROC:660:1:20:0")             -- teleport only -> nothing learnable
+feed("ICIPROC:662:1:20:0")             -- owned
+feed("ICINVEND")
+local function CountDeps()
+    local n = 0
+    for i = sentBase + 1, #sent do
+        if sent[i].msg == ("VLTDEP:0:" .. wSlot3) then n = n + 1 end
+    end
+    return n
+end
+ok(CountDeps() == 1, "first deposit sent")
+clock = clock + 2.6; tick()            -- still in bags -> resend
+ok(CountDeps() == 2, "unaccepted deposit re-sent")
+bagContents[0][wSlot3] = nil            -- vault accepts now
+clock = clock + 2.6; tick()
+clock = clock + 2.6; tick()
+ok(CountDeps() == 2, "accepted deposit stops the retries")
+-- give-up path: vault never accepts
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1011, itemId = 1011, stackCount = 1 }
+clock = clock + 2.1; tick()
+local wb4 = RowFor(1011)
+ctrlDown = true
+wb4._scripts["OnClick"](wb4, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local wSlot4
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1011 then wSlot4 = slot end
+end
+feed("ICITEM:B:0:" .. wSlot4)
+feed("ICIPROC:660:1:20:0")
+feed("ICINVEND")
+for _ = 1, 5 do clock = clock + 2.6; tick() end
+ok(lastStatus:find("deposit not accepted") ~= nil,
+    "give-up is honest: " .. lastStatus)
+ok(bagContents[0][wSlot4] == 1011, "copy still in bags after give-up")
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
