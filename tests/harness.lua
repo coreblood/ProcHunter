@@ -241,6 +241,11 @@ feed("VLTEND:")
 
 SlashCmdList["PROCHUNTER"]()
 local win = _G["ProcHunterFrame"]
+do
+    local cb = _G["ProcHunterShowExtracted"]
+    cb:SetChecked(true)
+    cb._scripts["OnClick"](cb)          -- legacy tests: show everything
+end
 ok(win._shown == true, "window visible on the FIRST toggle (v1.0.0 regression)")
 ok(#sent == 2 and sent[1].msg == "VLTGET" and sent[2].msg == "ICCOLL",
     "open sends VLTGET + ICCOLL underneath")
@@ -1089,11 +1094,33 @@ ok(lastStatus:find("deposit not accepted") ~= nil,
     "give-up is honest: " .. lastStatus)
 ok(bagContents[0][wSlot4] == 1011, "copy still in bags after give-up")
 
+--==================== auto-hide extracted + deposit bags ====================
+-- flip the tickbox OFF: fully-green items must vanish
+local cbx = _G["ProcHunterShowExtracted"]
+cbx:SetChecked(false)
+cbx._scripts["OnClick"](cbx)
+ok(not VisNamed("Storm Echo"), "fully-extracted item auto-hidden")
+ok(not VisNamed("Berserker Blade"), "green blade hidden too")
+ok(VisNamed("Portal Staff"), "partially-locked staff still shown")
+ok(VisNamed("Portal Rod"), "tele-only rod (extT=0) still shown")
+cbx:SetChecked(true)
+cbx._scripts["OnClick"](cbx)
+ok(VisNamed("Storm Echo"), "tickbox brings extracted items back")
+-- deposit bags: button -> popup -> VLTDEPALL
+local depBtn = _G["ProcHunterFrame"].depositAll
+ok(depBtn ~= nil and depBtn._text == "Deposit Bags", "deposit button present")
+depBtn._scripts["OnClick"](depBtn)
+ok(lastPopup == "PROCHUNTER_DEPALL", "confirm popup raised")
+StaticPopupDialogs["PROCHUNTER_DEPALL"].OnAccept()
+ok(sent[#sent].msg == "VLTDEPALL",
+    "bulk deposit is ONE server-side message: " .. sent[#sent].msg)
+
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
     ok(sent[i].msg == "VLTGET" or sent[i].msg == "ICCOLL"
         or sent[i].msg == "ICEXSRC" or sent[i].msg == "ICINV"
         or sent[i].msg:find("^VLTDEP:") ~= nil
+        or sent[i].msg == "VLTDEPALL"
         or sent[i].msg:find("^VLTWD:") ~= nil
         or sent[i].msg:find("^ICUNLOCK:") ~= nil,
         "wire send #" .. i .. " is a known verb")
