@@ -62,6 +62,7 @@ local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [666] = "Summon Portal", [667] = "Staff Ward",
     [892] = "Raging Blow", [893] = "Fury Surge",
     [895] = "Storm Fury", [896] = "Storm Fury",
+    [668] = "Relic Chill", [669] = "Angling",
     [897] = "Storm Fury", [898] = "Echo Ward" }
 function GetSpellInfo(id) return spells[id] end
 
@@ -78,6 +79,8 @@ local spellTips = {
     [663] = { "Teleport: Ironforge", "Teleports you to Ironforge." },
     [664] = { "Rune Power", "Chance on spell hit: Restores mana over 8 sec... deals 50 damage." },
     [666] = { "Summon Portal", "Creates a portal to Karazhan." },
+    [668] = { "Relic Chill", "Chance on hit: Chills the target for 4 sec." },
+    [669] = { "Angling", "Increases Fishing by 20." },
     [667] = { "Staff Ward", "Chance on hit: Absorbs 500 damage for 10 sec." },
     [556] = { "Ice Burst", "Chance on hit: ice." },
 }
@@ -197,9 +200,13 @@ ProcHunter_ProcDB[666] = "Portal Staff"
 ProcHunter_ProcDB[667] = "Portal Staff"
 ProcHunter_ProcDB[895] = "Storm Blade"
 ProcHunter_ProcDB[897] = "Storm Echo"
+ProcHunter_ProcDB[668] = "Frost Relic"
+ProcHunter_ProcDB[669] = "Angler Rod"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
+function date(fmt) return "12:00:00" end
+ChatFontNormal = {}
 StaticPopupDialogs = {}
 lastPopup = nil
 function StaticPopup_Show(key) lastPopup = key end
@@ -310,8 +317,9 @@ items[1007] = { name = "Eagle Cuirass", q = 2, ilvl = 100 }
 items[1008] = { name = "Berserker Blade", q = 3, ilvl = 150 }
 feed("VLTROW:1001,0,1,4,2,7,200,icon;1007,0,1,2,4,1,100,icon;1008,0,1,3,2,7,150,icon;")
 feed("VLTEND:")
-ok(lastStatus:find("2 with procs") ~= nil,
-    "cuirass hidden, blade kept (duration guard): " .. lastStatus)
+ok(lastStatus:find("3 with procs") ~= nil and not VisNamed("Eagle Cuirass")
+    and VisNamed("Berserker Blade"),
+    "cuirass display-hidden, blade kept, both counted: " .. lastStatus)
 ok(not VisNamed("Eagle Cuirass"), "flat-only cuirass not listed")
 local cf = _G["ProcHunterFlatCheck"]
 ok(cf ~= nil and cf._checked == true, "flat tickbox exists, default ON")
@@ -319,7 +327,7 @@ cf:SetChecked(false); cf._scripts["OnClick"](cf)
 ok(lastStatus:find("3 with procs") ~= nil and VisNamed("Eagle Cuirass"),
     "untick shows flat-only items: " .. lastStatus)
 cf:SetChecked(true); cf._scripts["OnClick"](cf)
-ok(lastStatus:find("2 with procs") ~= nil, "re-tick hides again: " .. lastStatus)
+ok(not VisNamed("Eagle Cuirass"), "re-tick hides again: " .. lastStatus)
 
 --==================== minimap + options ====================
 local mm = _G["ProcHunterMinimapButton"]
@@ -372,8 +380,8 @@ ok(visSmall and lastVis and visSmall < lastVis,
 items[1009] = { name = "Crit Cloak", q = 3, ilvl = 120 }
 feed("VLTROW:1007,0,1,2,4,1,100,icon;1009,0,1,3,4,1,120,icon;")
 feed("VLTEND:")
-ok(lastStatus:find("1 with procs") ~= nil,
-    "percent-bonus cloak visible: " .. lastStatus)
+ok(VisNamed("Crit Cloak") and not VisNamed("Eagle Cuirass"),
+    "percent-bonus cloak visible, cuirass display-hidden: " .. lastStatus)
 ok(not VisNamed("Eagle Cuirass"),
     "plain flat cuirass still hidden")
 
@@ -508,7 +516,11 @@ dlg2.okBtn._scripts["OnClick"]()
 clock = clock + 1.6; tick()
 ok(lastStatus:find("withdrawn: ") ~= nil and lastStatus:find("x2") ~= nil,
     "clamped amount delivered in ONE pinned call: " .. lastStatus)
-ok(RowFor(1001) == nil, "stack row gone after drain")
+do
+    local fr = RowFor(1001)
+    ok(fr == nil or (fr.data.count or 0) == 0,
+        "vault stock drained (copies now in bags)")
+end
 ok(ProcHunterDB.wdRoute == 1, "route re-remembered")
 
 --==================== one-per-call: partial stop reports N of M ====================
@@ -592,8 +604,11 @@ ok(sent[#sent].msg == ("ICUNLOCK:0:" .. axeSlot .. ":556:2"),
 feed("ICUNLOCKED:556:2")
 ok(lastStatus:find("unlocked: Ice Burst") ~= nil,
     "success flash: " .. lastStatus)
-ok(RowFor(1010) == nil,
-    "axe left the vault list — its only copy was withdrawn by the flow")
+do
+    local fr = RowFor(1010)
+    ok(fr == nil or (fr.data.count or 0) == 0,
+        "axe vault stock gone — the flow consumed its only copy")
+end
 
 --==================== extract flow: no-proc abort ====================
 local ring2 = RowFor(1006)
@@ -1114,6 +1129,108 @@ ok(lastPopup == "PROCHUNTER_DEPALL", "confirm popup raised")
 StaticPopupDialogs["PROCHUNTER_DEPALL"].OnAccept()
 ok(sent[#sent].msg == "VLTDEPALL",
     "bulk deposit is ONE server-side message: " .. sent[#sent].msg)
+
+--==================== v1.7.0: bag items in the scan ====================
+items[1017] = { name = "Frost Relic", q = 4, ilvl = 250 }
+bagContents[1] = bagContents[1] or {}
+bagContents[1][3] = 1017                -- bag-only, never in the vault
+comms._scripts["OnEvent"](comms, "BAG_UPDATE")
+clock = clock + 0.4; tick()             -- debounce fires the rebuild
+local relic = RowFor(1017)
+ok(relic ~= nil, "bag-only item joins the list")
+ok(relic.data.count == 0 and relic.data.bagCount == 1,
+    "bag-only counts: vault 0, bags 1")
+ok(relic.name._text:find("in bags") ~= nil,
+    "row shows the bags note: " .. relic.name._text)
+-- plain right-click cannot withdraw a bag-only item
+local sentB = #sent
+relic._scripts["OnClick"](relic, "RightButton")
+ok(#sent == sentB, "plain right-click sends nothing for bag-only")
+-- ctrl-click extracts IN PLACE: no withdraw, straight to locate
+ctrlDown = true
+relic._scripts["OnClick"](relic, "RightButton")
+ctrlDown = false
+local sawWD = false
+for i = sentB + 1, #sent do
+    if sent[i].msg:find("^VLTWD") then sawWD = true end
+end
+ok(not sawWD, "bag extraction sends no withdraw")
+ok(sent[#sent].msg == "ICINV", "locate requests went straight out")
+-- abort (timeout): the copy is YOURS — no redeposit, honest status
+clock = clock + 3.2; tick()             -- fast timeout at pace level 0
+ok(lastStatus:find("your copy stays in your bags") ~= nil,
+    "pre-existing copy never auto-deposited: " .. lastStatus)
+ok(bagContents[1][3] == 1017, "relic untouched in bags")
+local sawDep = false
+for i = sentB + 1, #sent do
+    if sent[i].msg:find("^VLTDEP") then sawDep = true end
+end
+ok(not sawDep, "no VLTDEP for a pre-existing copy")
+-- the timeout raised the pace level: next timeout is the slow one
+-- successful bag extraction end to end
+ctrlDown = true
+relic._scripts["OnClick"](relic, "RightButton")
+ctrlDown = false
+feed("ICITEM:B:0:99")                   -- server coords, elsewhere
+feed("ICIPROC:701:1:5:0")               -- not our item's name
+feed("ICITEM:B:1:3")                    -- exact client key also works
+feed("ICIPROC:668:1:15:0")              -- Relic Chill
+feed("ICINVEND")
+local exdR = _G["ProcHunterExtractDialog"]
+ok(exdR._shown == true, "bag-copy dialog open")
+exdR.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg == "ICUNLOCK:1:3:668:1",
+    "bag-copy unlock targets its own slot: " .. sent[#sent].msg)
+feed("ICUNLOCKED:668:1")
+bagContents[1][3] = nil                 -- server destroyed the copy
+
+--==================== v1.7.0: flat effects are extractable ====================
+-- fishing-pole class item: flat effect, display-hidden, still learned
+items[1018] = { name = "Angler Rod", q = 3, ilvl = 200 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1018, itemId = 1018, stackCount = 2 }
+clock = clock + 2.1; tick()
+ok(not VisNamed("Angler Rod"), "flat rod display-hidden (hideFlat on)")
+StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
+local rodSlot
+for _ = 1, 40 do
+    clock = clock + 0.4; tick()
+    for slot = 1, 16 do
+        if bagContents[0][slot] == 1018 then rodSlot = slot end
+    end
+    if rodSlot then break end
+end
+ok(rodSlot ~= nil, "runner withdrew the display-hidden flat rod")
+feed("ICITEM:B:0:" .. rodSlot)
+feed("ICIPROC:669:1:0:0")
+feed("ICINVEND")
+ok(sent[#sent].msg:find("^ICUNLOCK:0:" .. rodSlot .. ":669:1") ~= nil,
+    "flat effect auto-learned: " .. sent[#sent].msg)
+feed("ICUNLOCKED:669:1")
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1018 then bagContents[0][slot] = nil end
+end
+for _ = 1, 10 do clock = clock + 2.6; tick() end
+ok(_G["ProcHunterFrame"].extractAll._text == "Extract All",
+    "run finished after flat learn")
+
+--==================== v1.7.0: failure log ====================
+ok(ProcHunterDB.failLog ~= nil and #ProcHunterDB.failLog > 0,
+    "failures were logged (" .. #ProcHunterDB.failLog .. " entries)")
+local found
+for i = 1, #ProcHunterDB.failLog do
+    local en = ProcHunterDB.failLog[i]
+    if en.name == "Frost Relic" then found = en end
+end
+ok(found ~= nil and found.reason:find("no answer") ~= nil,
+    "relic timeout entry present with reason")
+ok(found.wire == nil or type(found.wire) == "table",
+    "wire capture attached or absent, never junk")
+local lb = _G["ProcHunterFrame"].logBtn
+lb._scripts["OnClick"](lb)
+local le = _G["ProcHunterLogEdit"]
+ok(le ~= nil and le._text:find("Frost Relic") ~= nil,
+    "log window shows the entry")
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
