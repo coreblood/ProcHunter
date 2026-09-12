@@ -1,6 +1,28 @@
 ProcHunter — Changelog
 ======================
 
+v1.6.2 (2026-09-11)
+-------------------
+DEPOSIT VERIFICATION + NAME-BASED OWNERSHIP
+
+- Redeposits are now VERIFIED. An unanswered extractor usually means
+  the server is throttling this client, and the same throttle could
+  eat the immediate VLTDEP — the copy silently stayed in your bags.
+  The slot is now watched: still holding the item 2.5s later, the
+  deposit is re-sent, up to 4 attempts spaced past any throttle
+  window. If the vault never accepts, the addon says so honestly:
+  "deposit not accepted — <item> left in your bags". Extract All
+  pauses while a redeposit is in flight.
+- Ownership is judged by proc NAME everywhere, not spell ID. The
+  server's collection stores its own rank IDs; when they differ from
+  the bundled DB's, items showed locked forever and every extract
+  came back "nothing left to learn". Now any owned rank of a name
+  counts in the tick math, the dialog greying, and Extract All's
+  queue — fully-learned items turn green the moment the collection
+  loads and are never offered again.
+
+/reload suffices.
+
 v1.6.1 (2026-09-11)
 -------------------
 PORTAL RULE + AUTO-REDEPOSIT
