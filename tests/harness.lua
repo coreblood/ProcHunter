@@ -53,7 +53,7 @@ function GetItemInfo(arg)
 end
 function GetItemIcon() return "tex" end
 
-local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
+spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [888] = "Enrage", [999] = "Increase Intellect 24",
     [777] = "Crit Aura", [555] = "Fire Burst", [556] = "Ice Burst",
     [890] = "Enrage", [701] = "Stone Skin",
@@ -64,11 +64,12 @@ local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [895] = "Storm Fury", [896] = "Storm Fury",
     [668] = "Relic Chill", [669] = "Angling",
     [670] = "Veteran Strike", [671] = "Veteran Vigor",
+    [672] = "Twilight Custom Proc", [673] = "Verdict Strike",
     [897] = "Storm Fury", [898] = "Echo Ward" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
-local spellTips = {
+spellTips = {
     [100] = { "Frost Bite", "Chance on hit: Blasts the enemy for 100 Frost damage." },
     [101] = { "Frost Bite", "Chance on hit: Blasts the enemy for 100 Frost damage." },
     [999] = { "Increase Intellect 24", "Increases Intellect by 24." },
@@ -84,6 +85,8 @@ local spellTips = {
     [669] = { "Angling", "Increases Fishing by 20." },
     [670] = { "Veteran Strike", "Chance on hit: Strikes for 500 damage." },
     [671] = { "Veteran Vigor", "Increases Stamina by 40." },
+    [672] = { "Twilight Custom Proc", "Chance on hit: twilight." },
+    [673] = { "Verdict Strike", "Chance on hit: strikes." },
     [667] = { "Staff Ward", "Chance on hit: Absorbs 500 damage for 10 sec." },
     [556] = { "Ice Burst", "Chance on hit: ice." },
 }
@@ -207,6 +210,8 @@ ProcHunter_ProcDB[668] = "Frost Relic"
 ProcHunter_ProcDB[669] = "Angler Rod"
 ProcHunter_ProcDB[670] = "Veteran Blade"
 ProcHunter_ProcDB[671] = "Veteran Blade"
+ProcHunter_ProcDB[672] = "Twilight Custom Scale"
+ProcHunter_ProcDB[673] = "Verdict Blade"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
@@ -1273,6 +1278,65 @@ if btn._text == "Stop" then
     for _ = 1, 8 do clock = clock + 2.6; tick() end
 end
 cbz:SetChecked(true); cbz._scripts["OnClick"](cbz) -- legacy state back
+
+--==================== v1.7.2: custom spells, entry-keyed ====================
+-- custom server spells have NO GetSpellInfo name: names cannot bridge.
+-- The wire's entry->spell rows must.  (75001/75002 have no names)
+local cbw = _G["ProcHunterShowExtracted"]
+cbw:SetChecked(false); cbw._scripts["OnClick"](cbw)
+items[1020] = { name = "Twilight Custom Scale", q = 4, ilvl = 284 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1020, itemId = 1020, stackCount = 5 }
+clock = clock + 2.1; tick()
+local tcs = RowFor(1020)
+ok(tcs ~= nil and tcs.data.extN < tcs.data.extT,
+    "custom item looks locked before learning (name bridge dead)")
+-- the server dumps a bag inventory: entry 1020 maps to custom 75001,
+-- and the collection already owns 75001
+feed("ICEXI:255:4:1020:1:75001:2")
+feed("ICEXIEND:1")
+feed("ICCOLLROW:75001:2:1020")
+feed("ICCOLLEND")
+clock = clock + 2.1; tick()
+ok(not VisNamed("Twilight Custom Scale"),
+    "entry-learned + collection-owned -> done and auto-hidden")
+cbw:SetChecked(true); cbw._scripts["OnClick"](cbw)
+local tcs2 = RowFor(1020)
+ok(tcs2 ~= nil and tcs2.data.extN == tcs2.data.extT
+    and tcs2.data.extT > 0, "done entry shows a full green tick")
+cbw:SetChecked(false); cbw._scripts["OnClick"](cbw)
+ok(ProcHunterDB.entrySpells and ProcHunterDB.entrySpells[1020] ~= nil,
+    "entry->spell learning persisted")
+-- verdict learning: a "nothing left" attempt marks the entry done
+items[1021] = { name = "Verdict Blade", q = 3, ilvl = 270 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1021, itemId = 1021, stackCount = 3 }
+clock = clock + 2.1; tick()
+local vbl = RowFor(1021)
+ok(vbl ~= nil, "verdict blade listed as locked")
+ctrlDown = true
+vbl._scripts["OnClick"](vbl, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local vSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1021 then vSlot = slot end
+end
+feed("ICITEM:B:0:" .. vSlot)
+feed("ICIPROC:75002:1:10:0")            -- custom, and already owned:
+feed("ICCOLLROW:75002:1:0")             -- (owned via collection merge)
+feed("ICCOLLEND")
+feed("ICINVEND")
+ok(lastStatus:find("nothing left to learn") ~= nil,
+    "server verdict surfaced: " .. lastStatus)
+ok(ProcHunterDB.doneEntries and ProcHunterDB.doneEntries[1021] == true,
+    "verdict remembered for the entry")
+bagContents[0][vSlot] = nil             -- vault accepted the redeposit
+comms._scripts["OnEvent"](comms, "BAG_UPDATE")
+clock = clock + 0.4; tick()             -- bag change rebuilds the list
+ok(not VisNamed("Verdict Blade"),
+    "verdict-done item hidden on the next rebuild")
+cbw:SetChecked(true); cbw._scripts["OnClick"](cbw) -- legacy state back
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
