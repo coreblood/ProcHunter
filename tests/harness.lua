@@ -56,7 +56,9 @@ function GetItemIcon() return "tex" end
 local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [888] = "Enrage", [999] = "Increase Intellect 24",
     [777] = "Crit Aura", [555] = "Fire Burst", [556] = "Ice Burst",
-    [890] = "Enrage", [701] = "Stone Skin" }
+    [890] = "Enrage", [701] = "Stone Skin",
+    [660] = "Warp Strike", [662] = "Sharp Edge",
+    [663] = "Teleport: Ironforge", [664] = "Rune Power" }
 function GetSpellInfo(id) return spells[id] end
 
 -- spell tooltip text used by the classification scanner
@@ -67,6 +69,10 @@ local spellTips = {
     [888] = { "Enrage", "Increases your attack power by 300 for 30 sec." },
     [777] = { "Crit Aura", "Improves critical strike damage by 3.15%." },
     [555] = { "Fire Burst", "Chance on hit: fire." },
+    [660] = { "Warp Strike", "Chance on hit: Teleports you behind the target." },
+    [662] = { "Sharp Edge", "Increases your attack power by 100 for 10 sec." },
+    [663] = { "Teleport: Ironforge", "Teleports you to Ironforge." },
+    [664] = { "Rune Power", "Chance on spell hit: Restores mana over 8 sec... deals 50 damage." },
     [556] = { "Ice Burst", "Chance on hit: ice." },
 }
 
@@ -177,8 +183,16 @@ ProcHunter_ProcDB = {
     [556] = "Dual Axe",
 }
 ProcHunter_ProcDB_Manual = { [400] = "Override Ring" }
+ProcHunter_ProcDB[660] = "Warp Blade"
+ProcHunter_ProcDB[662] = "Warp Blade"
+ProcHunter_ProcDB[663] = "Portal Rod"
+ProcHunter_ProcDB[664] = "Rune Rod"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
+
+StaticPopupDialogs = {}
+lastPopup = nil
+function StaticPopup_Show(key) lastPopup = key end
 
 dofile("ProcHunter/ProcHunter.lua")
 
@@ -825,6 +839,109 @@ ok(GameTooltip._shown == true, "tooltip shown on enter")
 r1._scripts["OnLeave"](r1)
 ok(GameTooltip._shown == false, "tooltip hidden on leave")
 exd6.cancelBtn._scripts["OnClick"]()
+
+--==================== teleport procs (server rule) ====================
+items[1011] = { name = "Warp Blade", q = 4, ilvl = 220 }
+items[1012] = { name = "Rune Rod", q = 3, ilvl = 210 }
+items[1013] = { name = "Portal Rod", q = 3, ilvl = 205 }
+for b = 0, 4 do
+    for slot = 1, 16 do
+        if bagContents[b] and bagContents[b][slot] == 1008 then
+            bagContents[b][slot] = nil
+        end
+    end
+end
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1011, itemId = 1011, stackCount = 4 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1012, itemId = 1012, stackCount = 2 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1013, itemId = 1013, stackCount = 3 }
+clock = clock + 2.1; tick()
+local wb, pRod = RowFor(1011), RowFor(1013)
+ok(wb ~= nil and pRod ~= nil, "teleport-test items listed")
+ok(pRod.data.extT == 0,
+    "tele-only item needs nothing extracted (extT=0)")
+ok(wb.data.extT == 1,
+    "Warp Blade counts only its non-tele proc (extT=" .. wb.data.extT .. ")")
+-- manual dialog: tele row greyed, non-tele auto-chosen
+ctrlDown = true
+wb._scripts["OnClick"](wb, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local wSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1011 then wSlot = slot end
+end
+feed("ICITEM:B:0:" .. wSlot)
+feed("ICIPROC:660:1:20:0")             -- Warp Strike: teleport proc
+feed("ICIPROC:662:1:20:0")             -- Sharp Edge: learnable
+feed("ICINVEND")
+local exd7 = _G["ProcHunterExtractDialog"]
+ok(exd7._shown == true, "warp blade dialog open")
+local teleRow, edgeRow
+for i = 1, 6 do
+    local pr = exd7.rows[i]
+    if pr.row and pr.row.spell == 660 then teleRow = pr end
+    if pr.row and pr.row.spell == 662 then edgeRow = pr end
+end
+ok(teleRow and teleRow.txt._text:find("cannot be extracted") ~= nil,
+    "teleport proc greyed with reason")
+ok(edgeRow and edgeRow.txt._text:find("cff33ff99") ~= nil,
+    "non-tele proc auto-chosen")
+teleRow._scripts["OnClick"](teleRow)   -- must not select
+ok(exd7.rows and true, "click on tele row is inert")
+exd7.okBtn._scripts["OnClick"]()
+ok(sent[#sent].msg:find("^ICUNLOCK:0:" .. wSlot .. ":662:1") ~= nil,
+    "confirm targets the non-tele proc: " .. sent[#sent].msg)
+feed("ICUNLOCKED:662:1")
+
+--==================== extract all ====================
+-- copy of 1011 destroyed server-side on unlock: mirror that here
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1011 then bagContents[0][slot] = nil end
+end
+-- queue should hold ONLY Rune Rod now (Warp Blade green, Portal Rod
+-- tele-only, everything else long unlocked)
+-- own every non-tele proc except Rune Power via a collection stream,
+-- so the queue is deterministic: Rune Rod alone
+for _, sp in ipairs({100, 101, 300, 400, 555, 556, 777,
+        888, 889, 890, 662}) do
+    feed("ICCOLLROW:" .. sp .. ":1:0")
+end
+feed("ICCOLLEND")
+StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
+ok(_G["ProcHunterFrame"].extractAll._text == "Stop",
+    "button flips to Stop while running")
+local rSlot2
+for _ = 1, 20 do                        -- runner walks the queue
+    clock = clock + 0.4; tick()
+    for slot = 1, 16 do
+        if bagContents[0][slot] == 1012 then rSlot2 = slot end
+    end
+    if rSlot2 then break end
+end
+clock = clock + 1.6; tick()            -- pin slot, locate requests
+ok(rSlot2 ~= nil, "runner withdrew a Rune Rod copy")
+feed("ICITEM:B:0:" .. rSlot2)
+feed("ICIPROC:664:1:10:0")
+feed("ICINVEND")                        -- auto-confirm fires here
+ok(sent[#sent].msg:find("^ICUNLOCK:0:" .. rSlot2 .. ":664:1") ~= nil,
+    "runner auto-confirmed without a dialog: " .. sent[#sent].msg)
+feed("ICUNLOCKED:664:1")
+for slot = 1, 16 do                     -- server destroys the copy
+    if bagContents[0][slot] == 1012 then bagContents[0][slot] = nil end
+end
+clock = clock + 2.6; tick()            -- pacing over: item now green -> advance
+clock = clock + 0.1; tick()            -- queue exhausted -> finish
+ok(_G["ProcHunterFrame"].extractAll._text == "Extract All",
+    "button back after the run")
+local doneMsg
+for i = #chat, 1, -1 do
+    if chat[i]:find("extract all finished") then doneMsg = chat[i] break end
+end
+ok(doneMsg ~= nil and doneMsg:find("1 proc learned") ~= nil,
+    "finish report: " .. tostring(doneMsg))
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
