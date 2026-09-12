@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.7.2 — Uncapped Vault proc scanner
+-- ProcHunter v1.7.3 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.7.2"
+local VERSION = "1.7.3"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -306,6 +306,13 @@ local function ServerDone(e)
     return true
 end
 
+-- THE done predicate. Ticked == done == hidden == skipped: the tick
+-- drawing, the hide filter, and the Extract All queue all consult
+-- this one test and can never disagree again.
+local function ItemDone(m)
+    return (m.extT or 0) > 0 and (m.extN or 0) >= m.extT
+end
+
 local function NameOwned(nm)
     return collNames and nm and collNames[lower(nm)]
 end
@@ -382,14 +389,26 @@ local function Rebuild()
                 end
             else
                 local spells = nameIndex[lower(baseName)]
-                if spells and #spells > 0 then
+                local learned = db and db.entrySpells
+                    and db.entrySpells[row.e]
+                if (spells and #spells > 0)
+                    or (learned and #learned > 0) then
                     local procs, flats = {}, {}
-                    for j = 1, #spells do
-                        local id = spells[j]
-                        if ClassifySpell(id) == "flat" then
-                            flats[#flats + 1] = id
-                        else
-                            procs[#procs + 1] = id
+                    if spells then
+                        for j = 1, #spells do
+                            local id = spells[j]
+                            if ClassifySpell(id) == "flat" then
+                                flats[#flats + 1] = id
+                            else
+                                procs[#procs + 1] = id
+                            end
+                        end
+                    end
+                    if #procs == 0 and #flats == 0 and learned then
+                        -- custom item unknown to the bundled DB: the
+                        -- wire taught its spells — list it anyway
+                        for j = 1, #learned do
+                            procs[#procs + 1] = learned[j]
                         end
                     end
                     do
@@ -403,7 +422,7 @@ local function Rebuild()
                         -- extraction math runs over ALL effect
                         -- names, flat included: the server's system
                         -- extracts any effect ("flat" is cosmetic)
-                        local effects = (#procs > 0) and procs or flats
+                        local effects = procs -- flats NEVER auto-extract
                         local extN, extT = 0, 0
                         if collSet and #effects > 0 then
                             local byName = {}
@@ -446,11 +465,10 @@ local function Rebuild()
                         allScan[#allScan + 1] = m
                         -- display filters are COSMETIC only: the full
                         -- scan above is what extraction machinery uses
-                        local allDone = extT > 0 and extN == extT
                         local hideAsFlat = (#procs == 0) and db.hideFlat
                         if hideAsFlat then
                             flatHidden = flatHidden + 1
-                        elseif allDone and not db.showExtracted then
+                        elseif ItemDone(m) and not db.showExtracted then
                             -- hidden, but still counted above
                         else
                             matched[#matched + 1] = m
@@ -468,17 +486,27 @@ local function Rebuild()
             local baseName = eq and GetItemInfo(e)
             if baseName then
                 local spells = nameIndex[lower(baseName)]
-                if spells and #spells > 0 then
+                local learned = db and db.entrySpells
+                    and db.entrySpells[e]
+                if (spells and #spells > 0)
+                    or (learned and #learned > 0) then
                     local procs, flats = {}, {}
-                    for j = 1, #spells do
-                        local id = spells[j]
-                        if ClassifySpell(id) == "flat" then
-                            flats[#flats + 1] = id
-                        else
-                            procs[#procs + 1] = id
+                    if spells then
+                        for j = 1, #spells do
+                            local id = spells[j]
+                            if ClassifySpell(id) == "flat" then
+                                flats[#flats + 1] = id
+                            else
+                                procs[#procs + 1] = id
+                            end
                         end
                     end
-                    local effects = (#procs > 0) and procs or flats
+                    if #procs == 0 and #flats == 0 and learned then
+                        for j = 1, #learned do
+                            procs[#procs + 1] = learned[j]
+                        end
+                    end
+                    local effects = procs -- flats NEVER auto-extract
                     local extN, extT = 0, 0
                     if collSet and #effects > 0 then
                         local byName = {}
@@ -517,10 +545,9 @@ local function Rebuild()
                         bagCount = n,
                     }
                     allScan[#allScan + 1] = m
-                    local allDone = extT > 0 and extN == extT
                     local hideAsFlat = (#procs == 0) and db.hideFlat
                     if not hideAsFlat
-                        and not (allDone and not db.showExtracted) then
+                        and not (ItemDone(m) and not db.showExtracted) then
                         procCount = procCount + 1
                         matched[#matched + 1] = m
                     end
@@ -947,6 +974,7 @@ local function StartExtract(m)
     exFailMsg, exDoneAt, exDoneName = nil, nil, nil
     local exp = {}
     local sl = m.effects or m.spells or m.procs or {}
+    if #sl == 0 then sl = m.flats or {} end -- manual flat-only: allowed
     for i = 1, #sl do
         local nm = GetSpellInfo(sl[i])
         if nm then exp[lower(nm)] = true end
@@ -1020,7 +1048,7 @@ end
 -- repeat until the item is fully green -> next item. Any failed flow
 -- skips the item (reported at the end) and never halts the run.
 local function LockedExtractable(m)
-    if ServerDone(m.e) then return 0 end
+    if ItemDone(m) or ServerDone(m.e) then return 0 end
     local ids = m.effects or m.procs or {}
     local byName = {}
     for i = 1, #ids do
@@ -1898,7 +1926,7 @@ RefreshList = function()
                     .. " in bags)|r"
             end
             r.name:SetText(QualityHex(m.q) .. (m.name or "?") .. "|r" .. cnt)
-            if m.extT and m.extT > 0 and m.extN >= m.extT then
+            if ItemDone(m) then
                 r.tick:SetVertexColor(1, 1, 1)       -- green tick: all unlocked
                 r.tick:Show()
             elseif m.extN and m.extN > 0 then
