@@ -63,6 +63,7 @@ local spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [892] = "Raging Blow", [893] = "Fury Surge",
     [895] = "Storm Fury", [896] = "Storm Fury",
     [668] = "Relic Chill", [669] = "Angling",
+    [670] = "Veteran Strike", [671] = "Veteran Vigor",
     [897] = "Storm Fury", [898] = "Echo Ward" }
 function GetSpellInfo(id) return spells[id] end
 
@@ -81,6 +82,8 @@ local spellTips = {
     [666] = { "Summon Portal", "Creates a portal to Karazhan." },
     [668] = { "Relic Chill", "Chance on hit: Chills the target for 4 sec." },
     [669] = { "Angling", "Increases Fishing by 20." },
+    [670] = { "Veteran Strike", "Chance on hit: Strikes for 500 damage." },
+    [671] = { "Veteran Vigor", "Increases Stamina by 40." },
     [667] = { "Staff Ward", "Chance on hit: Absorbs 500 damage for 10 sec." },
     [556] = { "Ice Burst", "Chance on hit: ice." },
 }
@@ -202,6 +205,8 @@ ProcHunter_ProcDB[895] = "Storm Blade"
 ProcHunter_ProcDB[897] = "Storm Echo"
 ProcHunter_ProcDB[668] = "Frost Relic"
 ProcHunter_ProcDB[669] = "Angler Rod"
+ProcHunter_ProcDB[670] = "Veteran Blade"
+ProcHunter_ProcDB[671] = "Veteran Blade"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
@@ -1231,6 +1236,43 @@ lb._scripts["OnClick"](lb)
 local le = _G["ProcHunterLogEdit"]
 ok(le ~= nil and le._text:find("Frost Relic") ~= nil,
     "log window shows the entry")
+
+--==================== v1.7.1: mixed items stay green ====================
+-- proc owned + an unowned passive aura in the DB: the aura must NOT
+-- re-open the item (it is not in the server's extraction system)
+items[1019] = { name = "Veteran Blade", q = 4, ilvl = 260 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1019, itemId = 1019, stackCount = 3 }
+feed("ICCOLLROW:670:1:0")               -- Veteran Strike owned
+feed("ICCOLLEND")
+local cbz = _G["ProcHunterShowExtracted"]
+cbz:SetChecked(true); cbz._scripts["OnClick"](cbz)
+clock = clock + 2.1; tick()
+local vb = RowFor(1019)
+ok(vb ~= nil and vb.data.extT == 1 and vb.data.extN == 1,
+    "tick counts the proc only, aura ignored (" ..
+    tostring(vb and vb.data.extN) .. "/" .. tostring(vb and vb.data.extT) .. ")")
+cbz:SetChecked(false); cbz._scripts["OnClick"](cbz)
+ok(not VisNamed("Veteran Blade"),
+    "mixed item green by its proc alone -> auto-hidden")
+-- and the runner must never touch it: no withdraw of 1019, ever
+StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
+for _ = 1, 12 do clock = clock + 0.4; tick() end
+local vbInBags = false
+for b = 0, 4 do
+    for slot = 1, 16 do
+        if bagContents[b] and bagContents[b][slot] == 1019 then
+            vbInBags = true
+        end
+    end
+end
+ok(not vbInBags, "runner never withdrew the green mixed item")
+local btn = _G["ProcHunterFrame"].extractAll
+if btn._text == "Stop" then
+    btn._scripts["OnClick"](btn)        -- stop the incidental run
+    for _ = 1, 8 do clock = clock + 2.6; tick() end
+end
+cbz:SetChecked(true); cbz._scripts["OnClick"](cbz) -- legacy state back
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
