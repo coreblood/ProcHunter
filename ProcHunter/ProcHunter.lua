@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.7.0 — Uncapped Vault proc scanner
+-- ProcHunter v1.7.1 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.7.0"
+local VERSION = "1.7.1"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -372,9 +372,7 @@ local function Rebuild()
                         -- extraction math runs over ALL effect
                         -- names, flat included: the server's system
                         -- extracts any effect ("flat" is cosmetic)
-                        local effects = {}
-                        for j = 1, #procs do effects[#effects + 1] = procs[j] end
-                        for j = 1, #flats do effects[#effects + 1] = flats[j] end
+                        local effects = (#procs > 0) and procs or flats
                         local extN, extT = 0, 0
                         if collSet and #effects > 0 then
                             local byName = {}
@@ -445,9 +443,7 @@ local function Rebuild()
                             procs[#procs + 1] = id
                         end
                     end
-                    local effects = {}
-                    for j = 1, #procs do effects[#effects + 1] = procs[j] end
-                    for j = 1, #flats do effects[#effects + 1] = flats[j] end
+                    local effects = (#procs > 0) and procs or flats
                     local extN, extT = 0, 0
                     if collSet and #effects > 0 then
                         local byName = {}
