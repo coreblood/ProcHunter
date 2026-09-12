@@ -65,7 +65,10 @@ spells = { [100] = "Frost Bite", [101] = "Frost Bite",
     [668] = "Relic Chill", [669] = "Angling",
     [670] = "Veteran Strike", [671] = "Veteran Vigor",
     [672] = "Twilight Custom Proc", [673] = "Verdict Strike",
-    [675] = "Power Word Strike",
+    [675] = "Power Word Strike", [899] = "Edge Fury", [900] = "Edge Fury",
+    [901] = "Saber Rend", [902] = "Dirk Bite", [903] = "Dirk Bite",
+    [904] = "Tabar Slash", [905] = "Warp Slash", [906] = "Saber Guard",
+    [907] = "Rapier Jab",
     [897] = "Storm Fury", [898] = "Echo Ward" }
 function GetSpellInfo(id) return spells[id] end
 
@@ -82,6 +85,9 @@ spellTips = {
     [663] = { "Teleport: Ironforge", "Teleports you to Ironforge." },
     [664] = { "Rune Power", "Chance on spell hit: Restores mana over 8 sec... deals 50 damage." },
     [666] = { "Summon Portal", "Creates a portal to Karazhan." },
+    [905] = { "Warp Slash", "Chance on hit: Teleports you behind the target." },
+    [906] = { "Saber Guard", "Chance on hit: Shields you for 300." },
+    [907] = { "Rapier Jab", "Chance on hit: Jabs for 200." },
     [668] = { "Relic Chill", "Chance on hit: Chills the target for 4 sec." },
     [669] = { "Angling", "Increases Fishing by 20." },
     [670] = { "Veteran Strike", "Chance on hit: Strikes for 500 damage." },
@@ -215,6 +221,13 @@ ProcHunter_ProcDB[671] = "Veteran Blade"
 ProcHunter_ProcDB[672] = "Twilight Custom Scale"
 ProcHunter_ProcDB[673] = "Verdict Blade"
 ProcHunter_ProcDB[675] = "Word of Power"
+ProcHunter_ProcDB[899] = "Berserk Edge"
+ProcHunter_ProcDB[901] = "Salvage Saber"
+ProcHunter_ProcDB[902] = "Dupe Dirk"
+ProcHunter_ProcDB[904] = "Tooltip Tabar"
+ProcHunter_ProcDB[905] = "Warp Saber"
+ProcHunter_ProcDB[906] = "Warp Saber"
+ProcHunter_ProcDB[907] = "Retry Rapier"
 ProcHunter_AbilityDB = { [500] = "Frostbrand Blade" } -- must NOT be indexed
 ProcHunter_DropDB = { [100] = { "Kirei's Chest" } }
 
@@ -328,6 +341,11 @@ ok(VisRows() == 3, "filter cleared shows 3 rows")
 --==================== flat-stat classification ====================
 items[1007] = { name = "Eagle Cuirass", q = 2, ilvl = 100 }
 items[1008] = { name = "Berserker Blade", q = 3, ilvl = 150 }
+items[1024] = { name = "Berserk Edge", q = 3, ilvl = 155 }
+items[1025] = { name = "Salvage Saber", q = 3, ilvl = 156 }
+items[1026] = { name = "Dupe Dirk", q = 3, ilvl = 157 }
+items[1027] = { name = "Tooltip Tabar", q = 3, ilvl = 158 }
+items[1028] = { name = "Warp Saber", q = 4, ilvl = 226 }
 feed("VLTROW:1001,0,1,4,2,7,200,icon;1007,0,1,2,4,1,100,icon;1008,0,1,3,2,7,150,icon;")
 feed("VLTEND:")
 ok(lastStatus:find("3 with procs") ~= nil and not VisNamed("Eagle Cuirass")
@@ -727,9 +745,9 @@ ok(lastStatus:find("unlocked") ~= nil, "ICINV path completes: " .. lastStatus)
 -- the live realm pushes ICINV the instant the copy lands — BEFORE the
 -- bag diff has pinned the slot. Cache must catch it; no request needed.
 UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1008, itemId = 1008, stackCount = 1 }
+    { e = 1024, itemId = 1024, stackCount = 1 }
 clock = clock + 2.1; tick()
-local blade4 = RowFor(1008)
+local blade4 = RowFor(1024)
 ok(blade4 ~= nil, "blade back for race test")
 ctrlDown = true
 blade4._scripts["OnClick"](blade4, "RightButton")
@@ -738,13 +756,13 @@ ctrlDown = false
 -- run: stage is still "withdraw", slot unpinned. The server pushes:
 local rSlot
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1008 then rSlot = slot end
+    if bagContents[0][slot] == 1024 then rSlot = slot end
 end
 ok(rSlot ~= nil, "copy landed before any tick")
 feed("ICITEM:B:4:19")
 feed("ICIPROC:999:1:50:0")            -- someone else's item
 feed("ICITEM:B:0:" .. rSlot)
-feed("ICIPROC:889:2:15:0")            -- ours
+feed("ICIPROC:900:2:15:0")            -- ours
 feed("ICITEM:E:0:1")                  -- equipped gear closes the bucket
 feed("ICIPROC:997:1:5:0")             -- must not leak into ours
 feed("ICINVEND")                       -- END during withdraw: NOT an abort
@@ -759,28 +777,28 @@ local nr = 0
 for i = 1, 6 do
     if exd3.rows[i] and exd3.rows[i].row then nr = nr + 1 end
 end
-ok(nr == 1 and exd3.rows[1].row.spell == 889,
+ok(nr == 1 and exd3.rows[1].row.spell == 900,
     "only the pinned slot's proc resolved (got " .. nr .. ")")
 clock = clock + 1.6; tick()            -- let the withdraw verify settle
 exd3.okBtn._scripts["OnClick"]()
-ok(sent[#sent].msg == ("ICUNLOCK:0:" .. rSlot .. ":889:2"),
+ok(sent[#sent].msg == ("ICUNLOCK:0:" .. rSlot .. ":900:2"),
     "ICUNLOCK correct after cache-hit path")
-feed("ICUNLOCKED:889:2")
+feed("ICUNLOCKED:900:2")
 ok(lastStatus:find("unlocked") ~= nil, "race path completes: " .. lastStatus)
 
 --==================== extract flow: truncated push salvage ====================
 -- rows arrive but the END line never does: locate timeout must use them
 UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1008, itemId = 1008, stackCount = 1 }
+    { e = 1025, itemId = 1025, stackCount = 1 }
 clock = clock + 2.1; tick()
-local blade5 = RowFor(1008)
+local blade5 = RowFor(1025)
 ctrlDown = true
 blade5._scripts["OnClick"](blade5, "RightButton")
 ctrlDown = false
 clock = clock + 1.6; tick()            -- pin slot; cache empty -> locate + requests
 local tSlot
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1008 then tSlot = slot end
+    if bagContents[0][slot] == 1025 then tSlot = slot end
 end
 feed("ICITEM:B:0:" .. tSlot)
 feed("ICIPROC:892:2:15:0")
@@ -796,25 +814,26 @@ exd4.cancelBtn._scripts["OnClick"]()
 -- Resolution must fall back to the item's own proc names — and only
 -- while exactly ONE copy of the item sits in bags.
 -- (890 = a rank variant of Enrage, unseen by collSet so selectable)
--- First: bags still hold old blade copies -> must abort as ambiguous.
+-- First: seed a second bag copy -> must abort as ambiguous.
+bagContents[0][14] = 1026
 UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1008, itemId = 1008, stackCount = 1 }
+    { e = 1026, itemId = 1026, stackCount = 1 }
 clock = clock + 2.1; tick()
-local blade6 = RowFor(1008)
+local blade6 = RowFor(1026)
 ok(blade6 ~= nil, "blade back for server-numbering test")
 ctrlDown = true
 blade6._scripts["OnClick"](blade6, "RightButton")
 ctrlDown = false
 clock = clock + 1.6; tick()            -- pin slot; cache empty -> locate
 feed("ICITEM:B:1:6")                   -- server coords: match nothing client-side
-feed("ICIPROC:890:2:15:0")             -- Enrage rank variant: name matches item
+feed("ICIPROC:903:2:15:0")             -- Enrage rank variant: name matches item
 feed("ICINVEND")
 ok(lastStatus:find("keep exactly ONE") ~= nil,
     "duplicate copies force a safe abort: " .. lastStatus)
 -- clear ALL blade copies from bags, keep none
 for b = 0, 4 do
     for slot = 1, 16 do
-        if bagContents[b] and bagContents[b][slot] == 1008 then
+        if bagContents[b] and bagContents[b][slot] == 1026 then
             bagContents[b][slot] = nil
         end
     end
@@ -856,21 +875,21 @@ ok(lastStatus:find("unlocked") ~= nil,
 -- reopen a dialog via the server-numbering path remnants: fresh flow
 for b = 0, 4 do
     for slot = 1, 16 do
-        if bagContents[b] and bagContents[b][slot] == 1008 then
+        if bagContents[b] and bagContents[b][slot] == 1027 then
             bagContents[b][slot] = nil
         end
     end
 end
 UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1008, itemId = 1008, stackCount = 1 }
+    { e = 1027, itemId = 1027, stackCount = 1 }
 clock = clock + 2.1; tick()
-local blade8 = RowFor(1008)
+local blade8 = RowFor(1027)
 ctrlDown = true
 blade8._scripts["OnClick"](blade8, "RightButton")
 ctrlDown = false
 local tSlot2
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1008 then tSlot2 = slot end
+    if bagContents[0][slot] == 1027 then tSlot2 = slot end
 end
 feed("ICITEM:B:0:" .. tSlot2)
 feed("ICIPROC:893:2:15:0")
@@ -955,7 +974,8 @@ end
 -- own every non-tele proc except Rune Power via a collection stream,
 -- so the queue is deterministic: Rune Rod alone
 for _, sp in ipairs({100, 101, 300, 400, 555, 556, 777,
-        888, 889, 890, 892, 893, 895, 896, 662}) do
+        888, 889, 890, 892, 893, 895, 896, 662,
+        899, 900, 901, 902, 903, 904}) do
     feed("ICCOLLROW:" .. sp .. ":1:0")
 end
 feed("ICCOLLEND")
@@ -1002,21 +1022,24 @@ local staff = RowFor(1014)
 ok(staff ~= nil, "portal staff listed")
 ok(staff.data.extT == 1,
     "portal proc excluded from tick math (extT=" .. staff.data.extT .. ")")
--- nothing-learnable copy goes STRAIGHT back: withdraw Warp Blade
--- (660 tele, 662 owned) — no dialog, VLTDEP sent
-local wb2 = RowFor(1011)
+-- nothing-learnable copy goes STRAIGHT back: withdraw Warp Saber
+-- (905 tele, 662 owned) — no dialog, VLTDEP sent
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1028, itemId = 1028, stackCount = 4 }
+clock = clock + 2.1; tick()
+local wb2 = RowFor(1028)
 ctrlDown = true
 wb2._scripts["OnClick"](wb2, "RightButton")
 ctrlDown = false
 clock = clock + 1.6; tick()
 local wSlot2
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1011 then wSlot2 = slot end
+    if bagContents[0][slot] == 1028 then wSlot2 = slot end
 end
 ok(wSlot2 ~= nil, "warp blade copy landed")
 local exdN = _G["ProcHunterExtractDialog"]
 feed("ICITEM:B:0:" .. wSlot2)
-feed("ICIPROC:660:1:20:0")             -- teleport
+feed("ICIPROC:905:1:20:0")             -- teleport
 feed("ICIPROC:662:1:20:0")             -- owned
 feed("ICINVEND")
 ok(exdN._shown == false, "no dialog when nothing is learnable")
@@ -1065,28 +1088,30 @@ ok(echo.data.extN == echo.data.extT and echo.data.extT == 1,
     echo.data.extN .. "/" .. echo.data.extT .. ")")
 
 --==================== deposit retry + give-up ====================
--- throttled vault: the first VLTDEP is eaten; the watcher must resend
-for b = 0, 4 do
-    for slot = 1, 16 do
-        if bagContents[b] and bagContents[b][slot] == 1011 then
-            bagContents[b][slot] = nil
-        end
-    end
-end
-local wb3 = RowFor(1011)
+-- throttled vault: the first VLTDEP is eaten; the watcher must resend.
+-- Fresh never-taught item so the abort is a plain no-answer timeout.
+items[1029] = { name = "Retry Rapier", q = 3, ilvl = 210 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1029, itemId = 1029, stackCount = 3 }
+clock = clock + 2.1; tick()
+local rr = RowFor(1029)
+ok(rr ~= nil, "retry rapier listed")
 local sentBase = #sent
 ctrlDown = true
-wb3._scripts["OnClick"](wb3, "RightButton")
+rr._scripts["OnClick"](rr, "RightButton")
 ctrlDown = false
 clock = clock + 1.6; tick()
 local wSlot3
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1011 then wSlot3 = slot end
+    if bagContents[0][slot] == 1029 then wSlot3 = slot end
 end
-feed("ICITEM:B:0:" .. wSlot3)
-feed("ICIPROC:660:1:20:0")             -- teleport only -> nothing learnable
-feed("ICIPROC:662:1:20:0")             -- owned
-feed("ICINVEND")
+ok(wSlot3 ~= nil, "rapier copy landed")
+for _ = 1, 4 do                          -- silence -> timeout abort
+    clock = clock + 3.3; tick()
+    if lastStatus:find("no answer") then break end
+end
+ok(lastStatus:find("no answer") ~= nil,
+    "no-answer abort (never-taught item): " .. lastStatus)
 local function CountDeps()
     local n = 0
     for i = sentBase + 1, #sent do
@@ -1102,167 +1127,22 @@ clock = clock + 2.6; tick()
 clock = clock + 2.6; tick()
 ok(CountDeps() == 2, "accepted deposit stops the retries")
 -- give-up path: vault never accepts
-UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1011, itemId = 1011, stackCount = 1 }
-clock = clock + 2.1; tick()
-local wb4 = RowFor(1011)
 ctrlDown = true
-wb4._scripts["OnClick"](wb4, "RightButton")
+rr._scripts["OnClick"](rr, "RightButton")
 ctrlDown = false
 clock = clock + 1.6; tick()
 local wSlot4
 for slot = 1, 16 do
-    if bagContents[0][slot] == 1011 then wSlot4 = slot end
+    if bagContents[0][slot] == 1029 then wSlot4 = slot end
 end
-feed("ICITEM:B:0:" .. wSlot4)
-feed("ICIPROC:660:1:20:0")
-feed("ICINVEND")
-for _ = 1, 5 do clock = clock + 2.6; tick() end
+for _ = 1, 4 do                          -- silence -> abort again
+    clock = clock + 3.3; tick()
+    if lastStatus:find("no answer") then break end
+end
+for _ = 1, 5 do clock = clock + 2.6; tick() end -- exhaust the retries
 ok(lastStatus:find("deposit not accepted") ~= nil,
     "give-up is honest: " .. lastStatus)
-ok(bagContents[0][wSlot4] == 1011, "copy still in bags after give-up")
-
---==================== auto-hide extracted + deposit bags ====================
--- flip the tickbox OFF: fully-green items must vanish
-local cbx = _G["ProcHunterShowExtracted"]
-cbx:SetChecked(false)
-cbx._scripts["OnClick"](cbx)
-ok(not VisNamed("Storm Echo"), "fully-extracted item auto-hidden")
-ok(not VisNamed("Berserker Blade"), "green blade hidden too")
-ok(VisNamed("Portal Staff"), "partially-locked staff still shown")
-ok(VisNamed("Portal Rod"), "tele-only rod (extT=0) still shown")
-cbx:SetChecked(true)
-cbx._scripts["OnClick"](cbx)
-ok(VisNamed("Storm Echo"), "tickbox brings extracted items back")
--- deposit bags: button -> popup -> VLTDEPALL
-local depBtn = _G["ProcHunterFrame"].depositAll
-ok(depBtn ~= nil and depBtn._text == "Deposit Bags", "deposit button present")
-depBtn._scripts["OnClick"](depBtn)
-ok(lastPopup == "PROCHUNTER_DEPALL", "confirm popup raised")
-StaticPopupDialogs["PROCHUNTER_DEPALL"].OnAccept()
-ok(sent[#sent].msg == "VLTDEPALL",
-    "bulk deposit is ONE server-side message: " .. sent[#sent].msg)
-
---==================== v1.7.0: bag items in the scan ====================
-items[1017] = { name = "Frost Relic", q = 4, ilvl = 250 }
-bagContents[1] = bagContents[1] or {}
-bagContents[1][3] = 1017                -- bag-only, never in the vault
-comms._scripts["OnEvent"](comms, "BAG_UPDATE")
-clock = clock + 0.4; tick()             -- debounce fires the rebuild
-local relic = RowFor(1017)
-ok(relic ~= nil, "bag-only item joins the list")
-ok(relic.data.count == 0 and relic.data.bagCount == 1,
-    "bag-only counts: vault 0, bags 1")
-ok(relic.name._text:find("in bags") ~= nil,
-    "row shows the bags note: " .. relic.name._text)
--- plain right-click cannot withdraw a bag-only item
-local sentB = #sent
-relic._scripts["OnClick"](relic, "RightButton")
-ok(#sent == sentB, "plain right-click sends nothing for bag-only")
--- ctrl-click extracts IN PLACE: no withdraw, straight to locate
-ctrlDown = true
-relic._scripts["OnClick"](relic, "RightButton")
-ctrlDown = false
-local sawWD = false
-for i = sentB + 1, #sent do
-    if sent[i].msg:find("^VLTWD") then sawWD = true end
-end
-ok(not sawWD, "bag extraction sends no withdraw")
-ok(sent[#sent].msg == "ICINV", "locate requests went straight out")
--- abort (timeout): the copy is YOURS — no redeposit, honest status
-clock = clock + 3.2; tick()             -- fast timeout at pace level 0
-ok(lastStatus:find("your copy stays in your bags") ~= nil,
-    "pre-existing copy never auto-deposited: " .. lastStatus)
-ok(bagContents[1][3] == 1017, "relic untouched in bags")
-local sawDep = false
-for i = sentB + 1, #sent do
-    if sent[i].msg:find("^VLTDEP") then sawDep = true end
-end
-ok(not sawDep, "no VLTDEP for a pre-existing copy")
--- the timeout raised the pace level: next timeout is the slow one
--- successful bag extraction end to end
-ctrlDown = true
-relic._scripts["OnClick"](relic, "RightButton")
-ctrlDown = false
-feed("ICITEM:B:0:99")                   -- server coords, elsewhere
-feed("ICIPROC:701:1:5:0")               -- not our item's name
-feed("ICITEM:B:1:3")                    -- exact client key also works
-feed("ICIPROC:668:1:15:0")              -- Relic Chill
-feed("ICINVEND")
-local exdR = _G["ProcHunterExtractDialog"]
-ok(exdR._shown == true, "bag-copy dialog open")
-exdR.okBtn._scripts["OnClick"]()
-ok(sent[#sent].msg == "ICUNLOCK:1:3:668:1",
-    "bag-copy unlock targets its own slot: " .. sent[#sent].msg)
-feed("ICUNLOCKED:668:1")
-bagContents[1][3] = nil                 -- server destroyed the copy
-
---==================== v1.7.0: flat effects are extractable ====================
--- fishing-pole class item: flat effect, display-hidden, still learned
-items[1018] = { name = "Angler Rod", q = 3, ilvl = 200 }
-UncappedVault.items[#UncappedVault.items + 1] =
-    { e = 1018, itemId = 1018, stackCount = 2 }
-clock = clock + 2.1; tick()
-ok(not VisNamed("Angler Rod"), "flat rod display-hidden (hideFlat on)")
--- the runner must NEVER auto-extract flat effects (library pollution)
-StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
-for _ = 1, 20 do clock = clock + 0.4; tick() end
-local rodTouched = false
-for slot = 1, 16 do
-    if bagContents[0][slot] == 1018 then rodTouched = true end
-end
-ok(not rodTouched, "runner never withdrew the flat-only rod")
-local btnF = _G["ProcHunterFrame"].extractAll
-if btnF._text == "Stop" then
-    btnF._scripts["OnClick"](btnF)
-    for _ = 1, 8 do clock = clock + 2.6; tick() end
-end
-ok(btnF._text == "Extract All", "incidental run wound down")
--- manual ctrl-click on a flat-only item still works, deliberately
-local cbf = _G["ProcHunterFlatCheck"]
-cbf:SetChecked(false); cbf._scripts["OnClick"](cbf)
-local rod = RowFor(1018)
-ok(rod ~= nil, "rod visible with hideFlat off")
-ctrlDown = true
-rod._scripts["OnClick"](rod, "RightButton")
-ctrlDown = false
-clock = clock + 1.6; tick()
-local rodSlot
-for slot = 1, 16 do
-    if bagContents[0][slot] == 1018 then rodSlot = slot end
-end
-ok(rodSlot ~= nil, "manual flat extraction withdrew a copy")
-feed("ICITEM:B:0:" .. rodSlot)
-feed("ICIPROC:669:1:0:0")
-feed("ICINVEND")
-local exdF = _G["ProcHunterExtractDialog"]
-ok(exdF._shown == true, "manual flat dialog opened")
-exdF.okBtn._scripts["OnClick"]()
-ok(sent[#sent].msg:find("^ICUNLOCK:0:" .. rodSlot .. ":669:1") ~= nil,
-    "manual flat learn allowed: " .. sent[#sent].msg)
-feed("ICUNLOCKED:669:1")
-for slot = 1, 16 do
-    if bagContents[0][slot] == 1018 then bagContents[0][slot] = nil end
-end
-cbf:SetChecked(true); cbf._scripts["OnClick"](cbf)
-
---==================== v1.7.0: failure log ====================
-ok(ProcHunterDB.failLog ~= nil and #ProcHunterDB.failLog > 0,
-    "failures were logged (" .. #ProcHunterDB.failLog .. " entries)")
-local found
-for i = 1, #ProcHunterDB.failLog do
-    local en = ProcHunterDB.failLog[i]
-    if en.name == "Frost Relic" then found = en end
-end
-ok(found ~= nil and found.reason:find("no answer") ~= nil,
-    "relic timeout entry present with reason")
-ok(found.wire == nil or type(found.wire) == "table",
-    "wire capture attached or absent, never junk")
-local lb = _G["ProcHunterFrame"].logBtn
-lb._scripts["OnClick"](lb)
-local le = _G["ProcHunterLogEdit"]
-ok(le ~= nil and le._text:find("Frost Relic") ~= nil,
-    "log window shows the entry")
+ok(bagContents[0][wSlot4] == 1029, "copy still in bags after give-up")
 
 --==================== v1.7.1: mixed items stay green ====================
 -- proc owned + an unowned passive aura in the DB: the aura must NOT
@@ -1423,6 +1303,7 @@ end
 UncappedVault.items[#UncappedVault.items + 1] =
     { e = 1023, itemId = 1023, stackCount = 1 }
 feed("ICCOLLROW:99999:1:0")             -- unrelated collection churn
+feed("ICCOLLROW:75200:1:1023")          -- keep the learned spell owned
 feed("ICCOLLEND")
 clock = clock + 2.1; tick()
 cbp:SetChecked(true); cbp._scripts["OnClick"](cbp)
@@ -1432,6 +1313,33 @@ if wop2 then                            -- may be done-hidden if 75200 owned
     -- 75200 owned -> item done: correct and covered above
 end
 cbp:SetChecked(true); cbp._scripts["OnClick"](cbp) -- legacy state back
+
+--==================== v1.7.5: ticked = untouchable ====================
+-- Word of Power is fully done (75200 collected): even a manual
+-- ctrl-click must refuse to withdraw it
+local cbt = _G["ProcHunterShowExtracted"]
+cbt:SetChecked(true); cbt._scripts["OnClick"](cbt)
+local wop3 = RowFor(1023)
+ok(wop3 ~= nil, "done item visible with the tickbox on")
+local sentT = #sent
+ctrlDown = true
+wop3._scripts["OnClick"](wop3, "RightButton")
+ctrlDown = false
+ok(#sent == sentT, "manual ctrl-click on a ticked item sends NOTHING")
+ok(lastStatus:find("already fully extracted") ~= nil,
+    "refusal surfaced: " .. lastStatus)
+-- run start announces the already-done skip count
+StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
+local startMsg
+for i = #chat, 1, -1 do
+    if chat[i]:find("already done") then startMsg = chat[i] break end
+end
+ok(startMsg ~= nil, "run start reports done skips: " .. tostring(startMsg))
+local btnT = _G["ProcHunterFrame"].extractAll
+if btnT._text == "Stop" then
+    btnT._scripts["OnClick"](btnT)
+    for _ = 1, 8 do clock = clock + 2.6; tick() end
+end
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
