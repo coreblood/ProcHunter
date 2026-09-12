@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.5.4 — Uncapped Vault proc scanner
+-- ProcHunter v1.6.0 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.5.4"
+local VERSION = "1.6.0"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -117,6 +117,7 @@ local collSet      = nil    -- spellId -> true (account's unlocked procs)
 local exFlow       = nil    -- in-flight extract {stage,e,rp,name,snap,bag,slot,rows,chosen,at}
 local exDlg                 -- extract consent dialog (lazy)
 local exDoneAt, exDoneName  -- success flash
+local runAll       = nil    -- Extract All run {queue,idx,tries,learned,skipped,wait,stopping}
 local exFailMsg    = nil    -- sticky abort reason
 local collStaging  = nil
 local lastCollReq  = 0
@@ -236,6 +237,28 @@ local function ClassifySpell(id)
     return c
 end
 
+-- server rule: teleport procs can never be extracted. Judged by the
+-- word appearing in the spell's name or tooltip text.
+local teleCache = {}
+local function IsTeleportSpell(id)
+    local c = teleCache[id]
+    if c ~= nil then return c end
+    local nm = GetSpellInfo(id)
+    c = (nm and find(lower(nm), "teleport")) and true or false
+    if not c then
+        local tip = GetScanTip()
+        tip:ClearLines()
+        tip:SetHyperlink("spell:" .. id)
+        for i = 1, tip:NumLines() or 0 do
+            local fs = _G["ProcHunterScanTipTextLeft" .. i]
+            local t = fs and fs:GetText()
+            if t and find(lower(t), "teleport") then c = true break end
+        end
+    end
+    teleCache[id] = c
+    return c
+end
+
 --========================= cache priming =============================
 local function Prime(e)
     local tip = GetScanTip()
@@ -292,14 +315,19 @@ local function Rebuild()
                             local byName = {}
                             for j = 1, #procs do
                                 local id = procs[j]
-                                local nm = GetSpellInfo(id) or ("#" .. id)
-                                local slot = byName[nm]
-                                if not slot then
-                                    slot = false
-                                    extT = extT + 1
+                                -- teleport procs are unextractable by
+                                -- server rule: they never count toward
+                                -- the tick, or items could not complete
+                                if not IsTeleportSpell(id) then
+                                    local nm = GetSpellInfo(id) or ("#" .. id)
+                                    local slot = byName[nm]
+                                    if slot == nil then
+                                        slot = false
+                                        extT = extT + 1
+                                    end
+                                    if collSet[id] then slot = true end
+                                    byName[nm] = slot
                                 end
-                                if collSet[id] then slot = true end
-                                byName[nm] = slot
                             end
                             for _, got in pairs(byName) do
                                 if got then extN = extN + 1 end
@@ -676,6 +704,14 @@ end
 local function AbortExtract(reason)
     exFlow = nil
     exFailMsg = reason
+    if runAll and runAll.idx <= #runAll.queue then
+        -- unattended run: an aborted flow skips the item, never halts
+        local q = runAll.queue[runAll.idx]
+        runAll.skipped[q.name] = reason
+        runAll.idx = runAll.idx + 1
+        runAll.tries = 0
+        runAll.wait = GetTime() + 2.5
+    end
     if exDlg then exDlg:Hide() end
     if RefreshList then RefreshList() end
 end
@@ -723,7 +759,118 @@ local function ConfirmExtract()
     if RefreshList then RefreshList() end
 end
 
+--======================== extract all runner =========================
+-- one consent up front, then unattended: per item -> withdraw one
+-- copy -> auto-pick the first locked, non-teleport proc -> unlock ->
+-- repeat until the item is fully green -> next item. Any failed flow
+-- skips the item (reported at the end) and never halts the run.
+local function LockedExtractable(m)
+    local ids = m.procs or {}
+    local byName = {}
+    for i = 1, #ids do
+        local id = ids[i]
+        if not IsTeleportSpell(id) then
+            local nm = lower(GetSpellInfo(id) or ("#" .. id))
+            if byName[nm] == nil then byName[nm] = false end
+            if collSet and collSet[id] then byName[nm] = true end
+        end
+    end
+    local n = 0
+    for _, got in pairs(byName) do if not got then n = n + 1 end end
+    return n
+end
+
+local function FinishRunAll(word)
+    local r = runAll
+    runAll = nil
+    if ui and ui.extractAll then ui.extractAll:SetText("Extract All") end
+    Msg(format("extract all %s — %d proc%s learned",
+        word, r.learned, r.learned == 1 and "" or "s"))
+    for name, why in pairs(r.skipped) do
+        Msg("  skipped " .. name .. ": " .. why)
+    end
+    if RefreshList then RefreshList() end
+end
+
+local function RunAllSkip(name, why)
+    runAll.skipped[name] = why
+    runAll.idx = runAll.idx + 1
+    runAll.tries = 0
+    runAll.wait = GetTime() + 2.5
+end
+
+local function RunAllTick(now)
+    local r = runAll
+    if not r then return end
+    if exFlow or pendingWD then return end -- a flow is in the air
+    if now < r.wait then return end
+    if r.stopping then return FinishRunAll("stopped") end
+    if r.idx > #r.queue then return FinishRunAll("finished") end
+    local q = r.queue[r.idx]
+    local m
+    for i = 1, #matched do
+        local c = matched[i]
+        if c.e == q.e and (c.rp or 0) == (q.rp or 0) then m = c break end
+    end
+    if not m then return RunAllSkip(q.name, "no longer in the vault") end
+    local locked = LockedExtractable(m)
+    if locked == 0 then -- fully learned: next item
+        r.idx = r.idx + 1
+        r.tries = 0
+        return
+    end
+    if CountBagCopies(m.e) > 0 then
+        return RunAllSkip(m.name,
+            "copies already in your bags — deposit them, then rerun")
+    end
+    if (m.count or 0) < 1 then
+        return RunAllSkip(m.name, "no copies left in the vault")
+    end
+    r.tries = r.tries + 1
+    if r.tries > locked + 2 then
+        return RunAllSkip(m.name,
+            "did not converge — unlocks not registering")
+    end
+    r.current = m.name
+    StartExtract(m)
+    if not exFlow then
+        RunAllSkip(m.name, exFailMsg or "flow could not start")
+    end
+end
+
+local function StartRunAll()
+    if runAll then return end
+    local queue = {}
+    for i = 1, #matched do
+        local m = matched[i]
+        if LockedExtractable(m) > 0 then
+            queue[#queue + 1] = { e = m.e, rp = m.rp, name = m.name }
+        end
+    end
+    if #queue == 0 then
+        Msg("extract all: nothing to learn — every extractable proc is already unlocked")
+        return
+    end
+    runAll = { queue = queue, idx = 1, tries = 0, learned = 0,
+        skipped = {}, wait = 0 }
+    if ui and ui.extractAll then ui.extractAll:SetText("Stop") end
+    Msg(format("extract all: %d item%s to work through",
+        #queue, #queue == 1 and "" or "s"))
+end
+
+StaticPopupDialogs["PROCHUNTER_EXTRACTALL"] = {
+    text = "Extract ALL missing procs?\n\nThis withdraws and DESTROYS " ..
+        "one vault copy per proc learned, item after item, until " ..
+        "everything extractable is unlocked. Teleport procs are " ..
+        "skipped (server rule).",
+    button1 = "Run it",
+    button2 = "Cancel",
+    OnAccept = StartRunAll,
+    timeout = 0, whileDead = 1, hideOnEscape = 1,
+}
+
 local function ExtractTick(now)
+    RunAllTick(now)
     local w = exFlow
     if not w then
         if exDoneAt and now - exDoneAt > 5 then
@@ -1003,6 +1150,10 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
                 exDoneAt = GetTime()
                 exDoneName = GetSpellInfo(sp) or ("#" .. sp)
                 exFlow = nil
+                if runAll then
+                    runAll.learned = runAll.learned + 1
+                    runAll.wait = GetTime() + 2.5 -- server throttle pacing
+                end
             end
             Rebuild() -- Dashboard unlocks absorbed too: ticks stay live
         end
@@ -1170,8 +1321,22 @@ local function BuildUI()
         RequestCollection()
     end)
 
+    local exAll = CreateFrame("Button", nil, ui, "UIPanelButtonTemplate")
+    exAll:SetWidth(90); exAll:SetHeight(20)
+    exAll:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
+    exAll:SetText("Extract All")
+    exAll:SetScript("OnClick", function()
+        if runAll then
+            runAll.stopping = true
+            Msg("extract all: stopping after the current item...")
+        else
+            StaticPopup_Show("PROCHUNTER_EXTRACTALL")
+        end
+    end)
+    ui.extractAll = exAll
+
     local filterLabel = ui:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    filterLabel:SetPoint("LEFT", refresh, "RIGHT", 14, 0)
+    filterLabel:SetPoint("LEFT", exAll, "RIGHT", 14, 0)
     filterLabel:SetText("Filter:")
 
     local filter = CreateFrame("EditBox", "ProcHunterFilterBox", ui,
@@ -1235,7 +1400,11 @@ local function BuildUI()
         r:SetScript("OnClick", function(self, button)
             if button == "RightButton" and self.data then
                 if IsControlKeyDown() then
-                    StartExtract(self.data)
+                    if runAll then
+                        Msg("extract all is running — press Stop first")
+                    else
+                        StartExtract(self.data)
+                    end
                 elseif IsShiftKeyDown() then
                     ShowAmountDialog(self.data)
                 else
@@ -1395,6 +1564,14 @@ RefreshList = function()
     elseif wdFailed then
         tail = tail .. "  ·  |cffff8080withdraw refused or ignored — send me UncappedVault.lua to pin the route|r"
     end
+    if runAll then
+        local shown = runAll.idx <= #runAll.queue
+            and runAll.idx or #runAll.queue
+        tail = tail .. format(
+            "  ·  |cffffd100extract all %d/%d: %s (%d learned)|r",
+            shown, #runAll.queue, runAll.current or "...",
+            runAll.learned)
+    end
     if exFlow then
         local st = exFlow.stage
         local word = st == "withdraw" and "withdrawing a copy"
@@ -1469,7 +1646,8 @@ ShowExtractDialog = function()
             pr.txt:SetPoint("RIGHT", 0, 0)
             pr.txt:SetJustifyH("LEFT")
             pr:SetScript("OnClick", function(self)
-                if exFlow and self.row and not self.row.owned then
+                if exFlow and self.row and not self.row.owned
+                    and not self.row.tele then
                     exFlow.chosen = self.row
                     ShowExtractDialog() -- redraw selection
                 end
@@ -1513,17 +1691,31 @@ ShowExtractDialog = function()
         exDlg:Hide() -- shown-by-default rule
     end
 
-    -- default selection: first proc not already unlocked
+    -- default selection: first locked, non-teleport proc
     local anyLearnable = false
     for i = 1, #w.rows do
         local r = w.rows[i]
         r.owned = collSet and collSet[r.spell] and true or false
-        if not r.owned then anyLearnable = true end
+        r.tele = IsTeleportSpell(r.spell)
+        if not r.owned and not r.tele then anyLearnable = true end
     end
-    if not w.chosen or w.chosen.owned then
+    if runAll then
+        -- unattended run: choose and confirm without any UI
+        if not anyLearnable then
+            return AbortExtract("nothing learnable on this copy")
+        end
         w.chosen = nil
         for i = 1, #w.rows do
-            if not w.rows[i].owned then w.chosen = w.rows[i]; break end
+            local r = w.rows[i]
+            if not r.owned and not r.tele then w.chosen = r break end
+        end
+        return ConfirmExtract()
+    end
+    if not w.chosen or w.chosen.owned or w.chosen.tele then
+        w.chosen = nil
+        for i = 1, #w.rows do
+            local r = w.rows[i]
+            if not r.owned and not r.tele then w.chosen = r; break end
         end
     end
 
@@ -1543,7 +1735,11 @@ ShowExtractDialog = function()
         if r then
             pr.row = r
             local nm = GetSpellInfo(r.spell) or ("Spell #" .. r.spell)
-            if r.owned then
+            if r.tele then
+                pr.txt:SetText("|cff666666" .. nm ..
+                    "  (teleport — cannot be extracted)|r")
+                pr.dot:SetVertexColor(0.4, 0.4, 0.4)
+            elseif r.owned then
                 pr.txt:SetText("|cff666666" .. nm ..
                     "  (already unlocked)|r")
                 pr.dot:SetVertexColor(0.4, 0.4, 0.4)
