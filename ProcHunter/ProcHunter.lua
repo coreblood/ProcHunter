@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.7.3 — Uncapped Vault proc scanner
+-- ProcHunter v1.7.4 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.7.3"
+local VERSION = "1.7.4"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -280,13 +280,23 @@ end
 -- bundled DB's stock IDs to the server's custom IDs — but the wire
 -- itself maps entry -> spell (ICEXI rows, ICCOLLROW's source field).
 -- Everything learned persists in SavedVariables.
-local function LearnEntrySpell(e, sp)
+local function SrvCoords(bag, slot)
+    if bag == 0 then return 255, slot - 1 end
+    return 18 + bag, slot - 1
+end
+
+local function LearnEntrySpell(e, sp, tr)
     if not db or e <= 0 or sp <= 0 then return end
     db.entrySpells = db.entrySpells or {}
     local t = db.entrySpells[e]
     if not t then t = {} db.entrySpells[e] = t end
-    for i = 1, #t do if t[i] == sp then return end end
-    t[#t + 1] = sp
+    local seen = false
+    for i = 1, #t do if t[i] == sp then seen = true break end end
+    if not seen then t[#t + 1] = sp end
+    if tr then
+        db.entryTrig = db.entryTrig or {}
+        db.entryTrig[e .. ":" .. sp] = tr
+    end
 end
 
 -- true when the server's own data says this entry is finished:
@@ -869,6 +879,15 @@ local function ResolveExRows(w)
         w.srvKey, w.rows = key, b
         return true
     end
+    -- the live realm keys its streams in SERVER coordinates: try the
+    -- deterministic translation before any name fallback
+    local sb, ss = SrvCoords(w.bag, w.slot)
+    local sKey = sb .. ":" .. ss
+    b = w.cache[sKey]
+    if b and #b > 0 then
+        w.srvKey, w.rows = sKey, b
+        return true
+    end
     local cand, candKey, n = nil, nil, 0
     for k, bk in pairs(w.cache) do
         if #bk > 0 then
@@ -1245,8 +1264,31 @@ local function ExtractTick(now)
             elseif why == "dupes" then
                 AbortExtract("several copies of this item are in your bags — keep exactly ONE, then retry")
             else
-                PaceFail()
-                AbortExtract("no answer from the extraction picker")
+                -- the live server ignores requests unless its own
+                -- Extraction panel is open. If the wire has already
+                -- TAUGHT this entry's spells, no stream is needed:
+                -- synthesize the rows and unlock with translated
+                -- server coordinates.
+                local learned = db and db.entrySpells
+                    and db.entrySpells[w.e]
+                if learned and #learned > 0 then
+                    w.rows = {}
+                    for i = 1, #learned do
+                        local sp = learned[i]
+                        local tr = db.entryTrig
+                            and db.entryTrig[w.e .. ":" .. sp] or 0
+                        w.rows[#w.rows + 1] =
+                            { spell = sp, trigger = tr }
+                    end
+                    local sb, ss = SrvCoords(w.bag, w.slot)
+                    w.srvKey = sb .. ":" .. ss
+                    w.stage = "dialog"
+                    w.at = now
+                    if ShowExtractDialog then ShowExtractDialog() end
+                else
+                    PaceFail()
+                    AbortExtract("no answer from the extraction picker — open the Extraction panel once so its stream can teach this item")
+                end
             end
         end
     elseif w.stage == "unlock" then
@@ -1436,9 +1478,9 @@ comms:SetScript("OnEvent", function(_, event, prefix, msg)
         local b, sl, en, eq, sp, tr = match(msg,
             "^ICEXI:(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)$")
         if b and tonumber(sp) > 0 then
-            -- learn entry -> spell from EVERY row: this is how custom
-            -- spells (invisible to GetSpellInfo) get bridged
-            LearnEntrySpell(tonumber(en), tonumber(sp))
+            -- learn entry -> spell (+trigger) from EVERY row: this is
+            -- how custom spells invisible to GetSpellInfo get bridged
+            LearnEntrySpell(tonumber(en), tonumber(sp), tonumber(tr))
         end
         if exFlow and b and tonumber(en) == exFlow.e
             and tonumber(sp) > 0 then
@@ -1518,7 +1560,10 @@ comms:SetScript("OnEvent", function(_, event, prefix, msg)
         if sp then
             collStaging = collStaging or {}
             collStaging[tonumber(sp)] = true
-            if src then LearnEntrySpell(tonumber(src), tonumber(sp)) end
+            if src then
+                LearnEntrySpell(tonumber(src), tonumber(sp),
+                    tr and tonumber(tr) or nil)
+            end
         end
     elseif find(msg, "^ICCOLLEND") then
         if collStaging then
