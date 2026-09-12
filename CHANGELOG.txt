@@ -1,6 +1,36 @@
 ProcHunter — Changelog
 ======================
 
+v1.7.0 (2026-09-12)
+-------------------
+BAGS IN THE SCAN + FLAT EXTRACTION + SPEED + FAILURE LOG
+
+- Your BAGS are scanned alongside the vault. Bag copies show on the
+  item's row as "(+N in bags)"; items you only hold in bags join the
+  list too. Extracting a bag copy skips the withdraw stage entirely —
+  straight to locate -> consent -> unlock. Vault stock is ALWAYS
+  consumed first; a bag copy is only used when the vault has none,
+  and only when exactly one is in bags. A pre-existing bag copy is
+  YOURS: aborted flows leave it exactly where it was — only copies
+  the addon itself withdrew are auto-redeposited. The list refreshes
+  live on bag changes.
+- "Flat" is now purely cosmetic. The server extracts ANY effect
+  (fishing skill, stat effects, on-use), so tick math, the dialog,
+  and Extract All consider every effect the DB knows (teleport/portal
+  still excluded). The Extract All queue is drawn from the FULL scan:
+  the hide-flat display filter can no longer hide work from the
+  runner. Crafty's Pole class items now extract.
+- ADAPTIVE PACING: flows run at 0.6s gaps and 3s timeouts until the
+  server pushes back (DSAERR, ICERR, or an unanswered request), then
+  back off to 2.5s/5s and 6s timeouts, recovering after three clean
+  flows. Clean runs are several times faster than v1.6.x.
+- LOG button (top right): every failed or skipped extraction is kept
+  (up to 200, across sessions) with time, item, entry ID, reason, and
+  the wire traffic captured during that flow. Select-all + Ctrl+C
+  friendly — paste it to Claude as-is. Clear button included.
+
+/reload suffices.
+
 v1.6.3 (2026-09-11)
 -------------------
 AUTO-HIDE EXTRACTED + DEPOSIT BAGS
