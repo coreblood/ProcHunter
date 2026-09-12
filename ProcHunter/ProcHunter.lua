@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.7.1 — Uncapped Vault proc scanner
+-- ProcHunter v1.7.2 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.7.1"
+local VERSION = "1.7.2"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -275,6 +275,37 @@ end
 -- collection stores ITS rank IDs, the bundled DB carries its own —
 -- any rank of a name owned means the name is owned, everywhere
 -- (ticks, dialog greying, Extract All's queue).
+-- LEARNED extraction knowledge, keyed by ITEM ENTRY. Custom Uncapped
+-- spells are invisible to GetSpellInfo, so names cannot bridge the
+-- bundled DB's stock IDs to the server's custom IDs — but the wire
+-- itself maps entry -> spell (ICEXI rows, ICCOLLROW's source field).
+-- Everything learned persists in SavedVariables.
+local function LearnEntrySpell(e, sp)
+    if not db or e <= 0 or sp <= 0 then return end
+    db.entrySpells = db.entrySpells or {}
+    local t = db.entrySpells[e]
+    if not t then t = {} db.entrySpells[e] = t end
+    for i = 1, #t do if t[i] == sp then return end end
+    t[#t + 1] = sp
+end
+
+-- true when the server's own data says this entry is finished:
+-- every spell the wire ever listed for it is in the collection —
+-- or a full extraction attempt came back "nothing left to learn"
+local function ServerDone(e)
+    if not db then return false end
+    if db.doneEntries and db.doneEntries[e] then return true end
+    local t = db.entrySpells and db.entrySpells[e]
+    if not t or #t == 0 or not collSet then return false end
+    for i = 1, #t do
+        local sp = t[i]
+        if not collSet[sp] and not IsTeleportSpell(sp) then
+            return false
+        end
+    end
+    return true
+end
+
 local function NameOwned(nm)
     return collNames and nm and collNames[lower(nm)]
 end
@@ -398,6 +429,10 @@ local function Rebuild()
                                 if got then extN = extN + 1 end
                             end
                         end
+                        if ServerDone(row.e) then
+                            extT = (extT > 0) and extT or 1
+                            extN = extT
+                        end
                         local m = {
                             e = row.e, rp = row.rp, count = row.count,
                             q = row.q, ilvl = row.ilvl,
@@ -465,6 +500,10 @@ local function Rebuild()
                         for _, got in pairs(byName) do
                             if got then extN = extN + 1 end
                         end
+                    end
+                    if ServerDone(e) then
+                        extT = (extT > 0) and extT or 1
+                        extN = extT
                     end
                     local _, _, q, ilvl = GetItemInfo(e)
                     local m = {
@@ -981,6 +1020,7 @@ end
 -- repeat until the item is fully green -> next item. Any failed flow
 -- skips the item (reported at the end) and never halts the run.
 local function LockedExtractable(m)
+    if ServerDone(m.e) then return 0 end
     local ids = m.effects or m.procs or {}
     local byName = {}
     for i = 1, #ids do
@@ -1365,15 +1405,17 @@ comms:SetScript("OnEvent", function(_, event, prefix, msg)
     elseif find(msg, "^VLTEND:") or msg == "VLTEND" then
         CommitSnapshot("wire")
     elseif find(msg, "^ICEXI:") then
-        -- old-pack dialect. Cached at ANY stage; filtered by entry
-        -- (bag/slot re-checked at resolve time via the bucket key)
-        if exFlow then
-            local b, sl, en, eq, sp, tr = match(msg,
-                "^ICEXI:(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)$")
-            if b and tonumber(en) == exFlow.e and tonumber(sp) > 0 then
-                AddExRow(exFlow, tonumber(b) .. ":" .. tonumber(sl),
-                    tonumber(sp), tonumber(tr))
-            end
+        local b, sl, en, eq, sp, tr = match(msg,
+            "^ICEXI:(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)$")
+        if b and tonumber(sp) > 0 then
+            -- learn entry -> spell from EVERY row: this is how custom
+            -- spells (invisible to GetSpellInfo) get bridged
+            LearnEntrySpell(tonumber(en), tonumber(sp))
+        end
+        if exFlow and b and tonumber(en) == exFlow.e
+            and tonumber(sp) > 0 then
+            AddExRow(exFlow, tonumber(b) .. ":" .. tonumber(sl),
+                tonumber(sp), tonumber(tr))
         end
     elseif find(msg, "^ICITEM:") then
         -- live-realm ICINV dialect: an ICITEM header announces which
@@ -1443,10 +1485,12 @@ comms:SetScript("OnEvent", function(_, event, prefix, msg)
                 (match(msg, "^ICERR:[^:]*:(.*)$") or msg))
         end
     elseif find(msg, "^ICCOLLROW:") then
-        local sp = match(msg, "^ICCOLLROW:(%d+):")
+        local sp, tr, src = match(msg, "^ICCOLLROW:(%d+):(%-?%d+):(%d+)")
+        sp = sp or match(msg, "^ICCOLLROW:(%d+):")
         if sp then
             collStaging = collStaging or {}
             collStaging[tonumber(sp)] = true
+            if src then LearnEntrySpell(tonumber(src), tonumber(sp)) end
         end
     elseif find(msg, "^ICCOLLEND") then
         if collStaging then
@@ -2098,7 +2142,12 @@ ShowExtractDialog = function()
     end
     if not anyLearnable then
         -- nothing on this copy can be learned (owned or teleport):
-        -- it goes straight back, no dialog
+        -- remember that VERDICT for the entry — the server's word
+        -- beats the bundled DB — then send the copy back, no dialog
+        if db then
+            db.doneEntries = db.doneEntries or {}
+            db.doneEntries[w.e] = true
+        end
         return AbortExtract("nothing left to learn on this copy")
     end
     if runAll then
