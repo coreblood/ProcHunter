@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.6.1 — Uncapped Vault proc scanner
+-- ProcHunter v1.6.2 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.6.1"
+local VERSION = "1.6.2"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -118,6 +118,8 @@ local exFlow       = nil    -- in-flight extract {stage,e,rp,name,snap,bag,slot,
 local exDlg                 -- extract consent dialog (lazy)
 local exDoneAt, exDoneName  -- success flash
 local runAll       = nil    -- Extract All run {queue,idx,tries,learned,skipped,wait,stopping}
+local pendingDep   = nil    -- redeposit being verified {bag,slot,e,name,tries,at}
+local collNames    = nil    -- lower(spell name) -> true, derived from collSet
 local exFailMsg    = nil    -- sticky abort reason
 local collStaging  = nil
 local lastCollReq  = 0
@@ -264,6 +266,26 @@ local function IsTeleportSpell(id)
     return c
 end
 
+-- ownership is judged by NAME, not by spell ID: the server's
+-- collection stores ITS rank IDs, the bundled DB carries its own —
+-- any rank of a name owned means the name is owned, everywhere
+-- (ticks, dialog greying, Extract All's queue).
+local function NameOwned(nm)
+    return collNames and nm and collNames[lower(nm)]
+end
+local function AddCollName(sp)
+    local nm = GetSpellInfo(sp)
+    if nm then
+        collNames = collNames or {}
+        collNames[lower(nm)] = true
+    end
+end
+local function RebuildCollNames()
+    collNames = nil
+    if not collSet then return end
+    for sp in pairs(collSet) do AddCollName(sp) end
+end
+
 --========================= cache priming =============================
 local function Prime(e)
     local tip = GetScanTip()
@@ -330,7 +352,9 @@ local function Rebuild()
                                         slot = false
                                         extT = extT + 1
                                     end
-                                    if collSet[id] then slot = true end
+                                    if collSet[id] or NameOwned(nm) then
+                                        slot = true
+                                    end
                                     byName[nm] = slot
                                 end
                             end
@@ -706,6 +730,11 @@ local function ResolveExRows(w)
     return nil, "none"
 end
 
+local function SendDep(bag, slot)
+    SendAddonMessage(SEND_PREFIX, format("VLTDEP:%d:%d", bag, slot),
+        "WHISPER", UnitName("player"))
+end
+
 local function AbortExtract(reason, keep)
     local w = exFlow
     exFlow = nil
@@ -714,9 +743,14 @@ local function AbortExtract(reason, keep)
         -- an unextractable copy goes STRAIGHT back to the vault.
         -- Client coords: the pinned slot is client-side truth, and
         -- VLTDEP is the same client-coord pair the pack's own
-        -- drag-to-deposit sends.
-        SendAddonMessage(SEND_PREFIX, format("VLTDEP:%d:%d",
-            w.bag, w.slot), "WHISPER", UnitName("player"))
+        -- drag-to-deposit sends. The send is then VERIFIED: an
+        -- unanswered extractor usually means the server is
+        -- throttling this client, and the same throttle can eat an
+        -- immediate VLTDEP — so the slot is watched and the deposit
+        -- re-sent until it is truly gone (see DepTick).
+        SendDep(w.bag, w.slot)
+        pendingDep = { bag = w.bag, slot = w.slot, e = w.e,
+            name = w.name, tries = 1, at = GetTime() }
         exFailMsg = reason .. " — copy returned to the vault"
     end
     if runAll and runAll.idx <= #runAll.queue then
@@ -787,7 +821,9 @@ local function LockedExtractable(m)
         if not IsTeleportSpell(id) then
             local nm = lower(GetSpellInfo(id) or ("#" .. id))
             if byName[nm] == nil then byName[nm] = false end
-            if collSet and collSet[id] then byName[nm] = true end
+            if (collSet and collSet[id]) or NameOwned(nm) then
+                byName[nm] = true
+            end
         end
     end
     local n = 0
@@ -817,7 +853,7 @@ end
 local function RunAllTick(now)
     local r = runAll
     if not r then return end
-    if exFlow or pendingWD then return end -- a flow is in the air
+    if exFlow or pendingWD or pendingDep then return end -- traffic in the air
     if now < r.wait then return end
     if r.stopping then return FinishRunAll("stopped") end
     if r.idx > #r.queue then return FinishRunAll("finished") end
@@ -884,7 +920,30 @@ StaticPopupDialogs["PROCHUNTER_EXTRACTALL"] = {
     timeout = 0, whileDead = 1, hideOnEscape = 1,
 }
 
+local function DepTick(now)
+    local d = pendingDep
+    if not d then return end
+    if now - d.at < 2.5 then return end
+    if BagEntry(d.bag, d.slot) ~= d.e then
+        pendingDep = nil -- the vault accepted it
+        return
+    end
+    if d.tries >= 4 then
+        -- never lie about where the copy is
+        pendingDep = nil
+        exFailMsg = "deposit not accepted — " .. (d.name or "the copy")
+            .. " left in your bags"
+        Msg(exFailMsg)
+        if RefreshList then RefreshList() end
+        return
+    end
+    d.tries = d.tries + 1
+    d.at = now
+    SendDep(d.bag, d.slot) -- any throttle window has long passed
+end
+
 local function ExtractTick(now)
+    DepTick(now)
     RunAllTick(now)
     local w = exFlow
     if not w then
@@ -1160,6 +1219,7 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
         if sp then
             collSet = collSet or {}
             collSet[sp] = true
+            AddCollName(sp)
             if exFlow and exFlow.stage == "unlock"
                 and exFlow.chosen and exFlow.chosen.spell == sp then
                 exDoneAt = GetTime()
@@ -1186,6 +1246,7 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
     elseif find(msg, "^ICCOLLEND") then
         if collStaging then
             collSet = collStaging
+            RebuildCollNames()
             collStaging = nil
             Rebuild()
         end
@@ -1710,7 +1771,8 @@ ShowExtractDialog = function()
     local anyLearnable = false
     for i = 1, #w.rows do
         local r = w.rows[i]
-        r.owned = collSet and collSet[r.spell] and true or false
+        r.owned = ((collSet and collSet[r.spell])
+            or NameOwned(GetSpellInfo(r.spell))) and true or false
         r.tele = IsTeleportSpell(r.spell)
         if not r.owned and not r.tele then anyLearnable = true end
     end
