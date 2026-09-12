@@ -1,6 +1,26 @@
 ProcHunter — Changelog
 ======================
 
+v1.7.3 (2026-09-12)
+-------------------
+PROCS ONLY + ONE DONE RULE + LEARNED CUSTOM ITEMS
+
+- FLAT EFFECTS NO LONGER AUTO-EXTRACT. Extract All and the tick math
+  consider real procs only — stat-stick effects stop polluting your
+  library. Flat-only items carry no tick and are never queued. A
+  deliberate manual Ctrl+Right-click on one still works (untick
+  "hide flat" to see them).
+- ONE done predicate: ticked == done == hidden == skipped. The tick
+  drawing, the auto-hide filter, and the Extract All queue now all
+  consult the same single test and can never disagree — a ticked
+  item cannot appear in the list (checkbox off) and cannot be queued.
+- Items the bundled DB does not know are now LISTED once the wire
+  has taught their spells (v1.7.2's entry map): they show as locked,
+  extract normally, and hide when collected. ProcHunter's coverage
+  converges on the server's own with every stream.
+
+/reload suffices.
+
 v1.7.2 (2026-09-12)
 -------------------
 CUSTOM SPELLS BRIDGED — ENTRY-KEYED LEARNING
