@@ -1201,28 +1201,47 @@ UncappedVault.items[#UncappedVault.items + 1] =
     { e = 1018, itemId = 1018, stackCount = 2 }
 clock = clock + 2.1; tick()
 ok(not VisNamed("Angler Rod"), "flat rod display-hidden (hideFlat on)")
+-- the runner must NEVER auto-extract flat effects (library pollution)
 StaticPopupDialogs["PROCHUNTER_EXTRACTALL"].OnAccept()
-local rodSlot
-for _ = 1, 40 do
-    clock = clock + 0.4; tick()
-    for slot = 1, 16 do
-        if bagContents[0][slot] == 1018 then rodSlot = slot end
-    end
-    if rodSlot then break end
+for _ = 1, 20 do clock = clock + 0.4; tick() end
+local rodTouched = false
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1018 then rodTouched = true end
 end
-ok(rodSlot ~= nil, "runner withdrew the display-hidden flat rod")
+ok(not rodTouched, "runner never withdrew the flat-only rod")
+local btnF = _G["ProcHunterFrame"].extractAll
+if btnF._text == "Stop" then
+    btnF._scripts["OnClick"](btnF)
+    for _ = 1, 8 do clock = clock + 2.6; tick() end
+end
+ok(btnF._text == "Extract All", "incidental run wound down")
+-- manual ctrl-click on a flat-only item still works, deliberately
+local cbf = _G["ProcHunterFlatCheck"]
+cbf:SetChecked(false); cbf._scripts["OnClick"](cbf)
+local rod = RowFor(1018)
+ok(rod ~= nil, "rod visible with hideFlat off")
+ctrlDown = true
+rod._scripts["OnClick"](rod, "RightButton")
+ctrlDown = false
+clock = clock + 1.6; tick()
+local rodSlot
+for slot = 1, 16 do
+    if bagContents[0][slot] == 1018 then rodSlot = slot end
+end
+ok(rodSlot ~= nil, "manual flat extraction withdrew a copy")
 feed("ICITEM:B:0:" .. rodSlot)
 feed("ICIPROC:669:1:0:0")
 feed("ICINVEND")
+local exdF = _G["ProcHunterExtractDialog"]
+ok(exdF._shown == true, "manual flat dialog opened")
+exdF.okBtn._scripts["OnClick"]()
 ok(sent[#sent].msg:find("^ICUNLOCK:0:" .. rodSlot .. ":669:1") ~= nil,
-    "flat effect auto-learned: " .. sent[#sent].msg)
+    "manual flat learn allowed: " .. sent[#sent].msg)
 feed("ICUNLOCKED:669:1")
 for slot = 1, 16 do
     if bagContents[0][slot] == 1018 then bagContents[0][slot] = nil end
 end
-for _ = 1, 10 do clock = clock + 2.6; tick() end
-ok(_G["ProcHunterFrame"].extractAll._text == "Extract All",
-    "run finished after flat learn")
+cbf:SetChecked(true); cbf._scripts["OnClick"](cbf)
 
 --==================== v1.7.0: failure log ====================
 ok(ProcHunterDB.failLog ~= nil and #ProcHunterDB.failLog > 0,
@@ -1337,6 +1356,31 @@ clock = clock + 0.4; tick()             -- bag change rebuilds the list
 ok(not VisNamed("Verdict Blade"),
     "verdict-done item hidden on the next rebuild")
 cbw:SetChecked(true); cbw._scripts["OnClick"](cbw) -- legacy state back
+
+--==================== v1.7.3: DB-less learned items ====================
+-- item unknown to the bundled DB: the wire taught its spell, so it
+-- must be listed, locked, extractable — and hide once collected
+items[1022] = { name = "Nameless Artifact", q = 4, ilvl = 290 }
+UncappedVault.items[#UncappedVault.items + 1] =
+    { e = 1022, itemId = 1022, stackCount = 2 }
+local cbn = _G["ProcHunterShowExtracted"]
+cbn:SetChecked(false); cbn._scripts["OnClick"](cbn)
+clock = clock + 2.1; tick()
+ok(RowFor(1022) == nil, "unknown item invisible before learning")
+feed("ICEXI:255:7:1022:1:75100:1")      -- the wire teaches the entry
+feed("ICEXIEND:1")
+clock = clock + 2.1; tick()
+cbn:SetChecked(true); cbn._scripts["OnClick"](cbn)
+cbn:SetChecked(false); cbn._scripts["OnClick"](cbn)
+local na = RowFor(1022)
+ok(na ~= nil and na._shown, "learned DB-less item now listed")
+ok(na.data.extT == 1 and na.data.extN == 0,
+    "listed as locked (" .. na.data.extN .. "/" .. na.data.extT .. ")")
+feed("ICCOLLROW:75100:1:1022")          -- now collected
+feed("ICCOLLEND")
+ok(not VisNamed("Nameless Artifact"),
+    "ticked == hidden: collected DB-less item vanished")
+cbn:SetChecked(true); cbn._scripts["OnClick"](cbn) -- legacy state back
 
 --==================== wire audit + debug/dump ====================
 for i = 1, #sent do
