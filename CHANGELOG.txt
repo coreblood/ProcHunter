@@ -1,6 +1,25 @@
 ProcHunter — Changelog
 ======================
 
+v1.7.1 (2026-09-12)
+-------------------
+HOTFIX — EXTRACTED ITEMS RE-OPENED BY PHANTOM AURAS
+
+v1.7.0 counted EVERY DB effect toward an item's green tick, including
+passive auras that were never in the server's extraction system. Any
+finished item carrying such an aura silently re-opened: it reappeared
+in the list, the queue exploded (300+ -> 900+), and the runner burned
+withdrawals on effects the server refuses ("unlock not confirmed").
+
+- The tick / queue / expectation set is now the item's PROCS when it
+  has any, and its flat effects only for flat-only items (Crafty's
+  Pole class stays extractable). Never the union.
+- Finished items are green and auto-hidden again; the queue is back
+  to real work only. Copies the runner wasted were auto-redeposited
+  by the existing machinery; nothing was lost, only time.
+
+/reload suffices.
+
 v1.7.0 (2026-09-12)
 -------------------
 BAGS IN THE SCAN + FLAT EXTRACTION + SPEED + FAILURE LOG
