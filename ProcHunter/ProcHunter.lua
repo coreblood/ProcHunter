@@ -1,5 +1,5 @@
 --=====================================================================
--- ProcHunter v1.6.3 — Uncapped Vault proc scanner
+-- ProcHunter v1.7.0 — Uncapped Vault proc scanner
 --
 -- Lists every item in the Uncapped Vault that (a) can be equipped by
 -- anyone (class/level restrictions ignored) and (b) carries an effect
@@ -49,7 +49,7 @@
 --=====================================================================
 
 local ADDON   = "ProcHunter"
-local VERSION = "1.6.3"
+local VERSION = "1.7.0"
 local SEND_PREFIX = "REAGENTBANK"
 local RECV_PREFIX = "UNC"
 
@@ -120,6 +120,11 @@ local exDoneAt, exDoneName  -- success flash
 local runAll       = nil    -- Extract All run {queue,idx,tries,learned,skipped,wait,stopping}
 local pendingDep   = nil    -- redeposit being verified {bag,slot,e,name,tries,at}
 local collNames    = nil    -- lower(spell name) -> true, derived from collSet
+local allScan      = {}     -- FULL scan (vault+bags), pre display filters
+local bagDirty     = nil    -- BAG_UPDATE debounce
+local flowWire     = nil    -- wire lines captured during the current flow
+local paceLevel    = 0      -- adaptive pacing: 0 fast .. 2 slow
+local paceClean    = 0      -- consecutive clean flows at this level
 local exFailMsg    = nil    -- sticky abort reason
 local collStaging  = nil
 local lastCollReq  = 0
@@ -296,11 +301,39 @@ end
 --========================= match pass ================================
 local RefreshList -- forward (defined with the UI)
 
+local function BagEntry(bag, slot)
+    local link = GetContainerItemLink(bag, slot)
+    return link and tonumber(match(link, "item:(%d+)")) or 0
+end
+
+local function CountBagCopies(e)
+    local n = 0
+    for bag = 0, 4 do
+        local sn = GetContainerNumSlots(bag) or 0
+        for slot = 1, sn do
+            if BagEntry(bag, slot) == e then n = n + 1 end
+        end
+    end
+    return n
+end
+
 local function Rebuild()
     BuildIndex()
     for k in pairs(matched) do matched[k] = nil end
+    for k in pairs(allScan) do allScan[k] = nil end
     for k in pairs(pending) do pending[k] = nil end
     pendingN, eqCount, procCount, flatHidden = 0, 0, 0, 0
+
+    -- bag inventory: entry -> copy count (gear never stacks)
+    local bagN = {}
+    for bag = 0, 4 do
+        local n = GetContainerNumSlots(bag) or 0
+        for slot = 1, n do
+            local e = BagEntry(bag, slot)
+            if e > 0 then bagN[e] = (bagN[e] or 0) + 1 end
+        end
+    end
+    local vaultSeen = {}
 
     for i = 1, #vault do
         local row = vault[i]
@@ -328,20 +361,25 @@ local function Rebuild()
                             procs[#procs + 1] = id
                         end
                     end
-                    if #procs == 0 and db.hideFlat then
-                        flatHidden = flatHidden + 1
-                    else
+                    do
                         procCount = procCount + 1
+                        vaultSeen[row.e] = true
                         local link = ItemLink(row.e, row.rp)
                         local dispName = GetItemInfo(link) or baseName
                         -- extraction status, judged per unique proc NAME
                         -- (rank variants share a name; owning any rank
                         -- counts that name as unlocked)
+                        -- extraction math runs over ALL effect
+                        -- names, flat included: the server's system
+                        -- extracts any effect ("flat" is cosmetic)
+                        local effects = {}
+                        for j = 1, #procs do effects[#effects + 1] = procs[j] end
+                        for j = 1, #flats do effects[#effects + 1] = flats[j] end
                         local extN, extT = 0, 0
-                        if collSet and #procs > 0 then
+                        if collSet and #effects > 0 then
                             local byName = {}
-                            for j = 1, #procs do
-                                local id = procs[j]
+                            for j = 1, #effects do
+                                local id = effects[j]
                                 -- teleport procs are unextractable by
                                 -- server rule: they never count toward
                                 -- the tick, or items could not complete
@@ -362,22 +400,94 @@ local function Rebuild()
                                 if got then extN = extN + 1 end
                             end
                         end
-                        -- fully-extracted items hide by default:
-                        -- nothing left to do with them. The "show
-                        -- extracted" tickbox brings them back.
+                        local m = {
+                            e = row.e, rp = row.rp, count = row.count,
+                            q = row.q, ilvl = row.ilvl,
+                            name = dispName, link = link,
+                            procs = procs, flats = flats,
+                            effects = effects,
+                            spells = (#procs > 0) and procs or flats,
+                            extN = extN, extT = extT,
+                            bagCount = bagN[row.e] or 0,
+                        }
+                        allScan[#allScan + 1] = m
+                        -- display filters are COSMETIC only: the full
+                        -- scan above is what extraction machinery uses
                         local allDone = extT > 0 and extN == extT
-                        if allDone and not db.showExtracted then
+                        local hideAsFlat = (#procs == 0) and db.hideFlat
+                        if hideAsFlat then
+                            flatHidden = flatHidden + 1
+                        elseif allDone and not db.showExtracted then
                             -- hidden, but still counted above
                         else
-                            matched[#matched + 1] = {
-                                e = row.e, rp = row.rp, count = row.count,
-                                q = row.q, ilvl = row.ilvl,
-                                name = dispName, link = link,
-                                procs = procs, flats = flats,
-                                spells = (#procs > 0) and procs or flats,
-                                extN = extN, extT = extT,
-                            }
+                            matched[#matched + 1] = m
                         end
+                    end
+                end
+            end
+        end
+    end
+
+    -- items sitting ONLY in bags (no vault stock) join the scan too
+    for e, n in pairs(bagN) do
+        if not vaultSeen[e] then
+            local eq = IsEquippable({ e = e })
+            local baseName = eq and GetItemInfo(e)
+            if baseName then
+                local spells = nameIndex[lower(baseName)]
+                if spells and #spells > 0 then
+                    local procs, flats = {}, {}
+                    for j = 1, #spells do
+                        local id = spells[j]
+                        if ClassifySpell(id) == "flat" then
+                            flats[#flats + 1] = id
+                        else
+                            procs[#procs + 1] = id
+                        end
+                    end
+                    local effects = {}
+                    for j = 1, #procs do effects[#effects + 1] = procs[j] end
+                    for j = 1, #flats do effects[#effects + 1] = flats[j] end
+                    local extN, extT = 0, 0
+                    if collSet and #effects > 0 then
+                        local byName = {}
+                        for j = 1, #effects do
+                            local id = effects[j]
+                            if not IsTeleportSpell(id) then
+                                local nm = GetSpellInfo(id) or ("#" .. id)
+                                local slot = byName[nm]
+                                if slot == nil then
+                                    slot = false
+                                    extT = extT + 1
+                                end
+                                if collSet[id] or NameOwned(nm) then
+                                    slot = true
+                                end
+                                byName[nm] = slot
+                            end
+                        end
+                        for _, got in pairs(byName) do
+                            if got then extN = extN + 1 end
+                        end
+                    end
+                    local _, _, q, ilvl = GetItemInfo(e)
+                    local m = {
+                        e = e, rp = 0, count = 0,
+                        q = q, ilvl = ilvl,
+                        name = baseName, link = ItemLink(e, 0),
+                        procs = procs, flats = flats,
+                        effects = effects,
+                        spells = (#procs > 0) and procs or flats,
+                        extN = extN, extT = extT,
+                        bagCount = n,
+                    }
+                    allScan[#allScan + 1] = m
+                    local allDone = extT > 0 and extN == extT
+                    local hideAsFlat = (#procs == 0) and db.hideFlat
+                    if not hideAsFlat
+                        and not (allDone and not db.showExtracted) then
+                        procCount = procCount + 1
+                        matched[#matched + 1] = m
                     end
                 end
             end
@@ -636,22 +746,6 @@ local function StartWithdraw(m, count)
 end
 
 --========================= extract flow ==============================
-local function BagEntry(bag, slot)
-    local link = GetContainerItemLink(bag, slot)
-    return link and tonumber(match(link, "item:(%d+)")) or 0
-end
-
-local function CountBagCopies(e)
-    local n = 0
-    for bag = 0, 4 do
-        local sn = GetContainerNumSlots(bag) or 0
-        for slot = 1, sn do
-            if BagEntry(bag, slot) == e then n = n + 1 end
-        end
-    end
-    return n
-end
-
 local function SnapshotBags()
     local snap = {}
     for bag = 0, 4 do
@@ -738,6 +832,33 @@ local function ResolveExRows(w)
     return nil, "none"
 end
 
+-- adaptive pacing: fast until the server pushes back (DSAERR, ICERR,
+-- an unanswered request), then back off; recover after clean flows
+local PACE_GAPS = { 0.6, 2.5, 5 }
+local function PaceGap() return PACE_GAPS[paceLevel + 1] or 5 end
+local function PaceTimeout() return (paceLevel == 0) and 3 or 6 end
+local function PaceFail()
+    if paceLevel < 2 then paceLevel = paceLevel + 1 end
+    paceClean = 0
+end
+local function PaceOk()
+    paceClean = paceClean + 1
+    if paceClean >= 3 and paceLevel > 0 then
+        paceLevel = paceLevel - 1
+        paceClean = 0
+    end
+end
+
+-- persistent failure log (the Log button reads this)
+local function LogFail(name, e, reason, wire)
+    if not db then return end
+    db.failLog = db.failLog or {}
+    local log = db.failLog
+    log[#log + 1] = { t = date("%H:%M:%S"), name = name, e = e,
+        reason = reason, wire = wire }
+    while #log > 200 do table.remove(log, 1) end
+end
+
 local function SendDep(bag, slot)
     SendAddonMessage(SEND_PREFIX, format("VLTDEP:%d:%d", bag, slot),
         "WHISPER", UnitName("player"))
@@ -747,7 +868,17 @@ local function AbortExtract(reason, keep)
     local w = exFlow
     exFlow = nil
     exFailMsg = reason
-    if not keep and w and w.bag and BagEntry(w.bag, w.slot) == w.e then
+    if not keep and w then
+        LogFail(w.name, w.e, reason, flowWire)
+    end
+    flowWire = nil
+    if w and not w.withdrawn then
+        -- a copy YOU had in bags before the flow is yours: aborted
+        -- flows leave it exactly where it was, never auto-deposit it
+        if not keep and w.bag then
+            exFailMsg = reason .. " — your copy stays in your bags"
+        end
+    elseif not keep and w and w.bag and BagEntry(w.bag, w.slot) == w.e then
         -- an unextractable copy goes STRAIGHT back to the vault.
         -- Client coords: the pinned slot is client-side truth, and
         -- VLTDEP is the same client-coord pair the pack's own
@@ -767,32 +898,64 @@ local function AbortExtract(reason, keep)
         runAll.skipped[q.name] = reason
         runAll.idx = runAll.idx + 1
         runAll.tries = 0
-        runAll.wait = GetTime() + 2.5
+        runAll.wait = GetTime() + PaceGap()
     end
     if exDlg then exDlg:Hide() end
     if RefreshList then RefreshList() end
 end
 
 local ShowExtractDialog -- forward (defined with the UI section below)
+local ToggleLogFrame    -- forward (failure-log window)
 
 local function StartExtract(m)
     if pendingWD or exFlow then return end
     exFailMsg, exDoneAt, exDoneName = nil, nil, nil
     local exp = {}
-    local sl = m.spells or m.procs or {}
+    local sl = m.effects or m.spells or m.procs or {}
     for i = 1, #sl do
         local nm = GetSpellInfo(sl[i])
         if nm then exp[lower(nm)] = true end
     end
-    exFlow = {
-        stage = "withdraw", e = m.e, rp = m.rp or 0,
-        name = m.name or "?", q = m.q, expect = exp,
-        snap = SnapshotBags(), at = GetTime(),
-    }
-    StartWithdraw(m, 1)
-    if not pendingWD then -- withdraw could not even start
-        AbortExtract("withdrawal could not start")
+    flowWire = {}
+    -- vault first, always: a copy YOU keep in bags is only consumed
+    -- when the vault has none of the item
+    if (m.count or 0) > 0 then
+        exFlow = {
+            stage = "withdraw", e = m.e, rp = m.rp or 0,
+            name = m.name or "?", q = m.q, expect = exp,
+            snap = SnapshotBags(), at = GetTime(),
+            withdrawn = true,
+        }
+        StartWithdraw(m, 1)
+        if not pendingWD then -- withdraw could not even start
+            AbortExtract("withdrawal could not start")
+        end
+        return
     end
+    -- no vault stock: extract a bag copy in place (no withdraw stage)
+    if CountBagCopies(m.e) ~= 1 then
+        exFailMsg = (m.bagCount or 0) > 1
+            and "several copies in your bags — keep exactly ONE, then retry"
+            or "no copy left anywhere"
+        flowWire = nil
+        if RefreshList then RefreshList() end
+        return
+    end
+    local fb, fs
+    for bag = 0, 4 do
+        local n = GetContainerNumSlots(bag) or 0
+        for slot = 1, n do
+            if BagEntry(bag, slot) == m.e then fb, fs = bag, slot end
+        end
+    end
+    exFlow = {
+        stage = "locate", e = m.e, rp = m.rp or 0,
+        name = m.name or "?", q = m.q, expect = exp,
+        bag = fb, slot = fs, at = GetTime(),
+        withdrawn = false,
+    }
+    SendAddonMessage(SEND_PREFIX, "ICEXSRC", "WHISPER", UnitName("player"))
+    SendAddonMessage(SEND_PREFIX, "ICINV", "WHISPER", UnitName("player"))
 end
 
 local function ConfirmExtract()
@@ -822,7 +985,7 @@ end
 -- repeat until the item is fully green -> next item. Any failed flow
 -- skips the item (reported at the end) and never halts the run.
 local function LockedExtractable(m)
-    local ids = m.procs or {}
+    local ids = m.effects or m.procs or {}
     local byName = {}
     for i = 1, #ids do
         local id = ids[i]
@@ -853,9 +1016,10 @@ end
 
 local function RunAllSkip(name, why)
     runAll.skipped[name] = why
+    LogFail(name, nil, why, nil)
     runAll.idx = runAll.idx + 1
     runAll.tries = 0
-    runAll.wait = GetTime() + 2.5
+    runAll.wait = GetTime() + PaceGap()
 end
 
 local function RunAllTick(now)
@@ -867,23 +1031,30 @@ local function RunAllTick(now)
     if r.idx > #r.queue then return FinishRunAll("finished") end
     local q = r.queue[r.idx]
     local m
-    for i = 1, #matched do
-        local c = matched[i]
+    for i = 1, #allScan do
+        local c = allScan[i]
         if c.e == q.e and (c.rp or 0) == (q.rp or 0) then m = c break end
     end
-    if not m then return RunAllSkip(q.name, "no longer in the vault") end
+    if not m then return RunAllSkip(q.name, "no longer in vault or bags") end
     local locked = LockedExtractable(m)
     if locked == 0 then -- fully learned: next item
         r.idx = r.idx + 1
         r.tries = 0
         return
     end
-    if CountBagCopies(m.e) > 0 then
-        return RunAllSkip(m.name,
-            "copies already in your bags — deposit them, then rerun")
-    end
-    if (m.count or 0) < 1 then
-        return RunAllSkip(m.name, "no copies left in the vault")
+    if (m.count or 0) > 0 then
+        -- vault stock exists: your kept bag copies are never touched,
+        -- but they DO break the fresh-copy identification — skip
+        if CountBagCopies(m.e) > 0 then
+            return RunAllSkip(m.name,
+                "copies already in your bags — deposit them, then rerun")
+        end
+    else
+        -- vault empty: consume the bag copy, but only when exactly one
+        if CountBagCopies(m.e) ~= 1 then
+            return RunAllSkip(m.name,
+                "no vault stock and several bag copies — keep exactly ONE")
+        end
     end
     r.tries = r.tries + 1
     if r.tries > locked + 2 then
@@ -900,8 +1071,8 @@ end
 local function StartRunAll()
     if runAll then return end
     local queue = {}
-    for i = 1, #matched do
-        local m = matched[i]
+    for i = 1, #allScan do
+        local m = allScan[i]
         if LockedExtractable(m) > 0 then
             queue[#queue + 1] = { e = m.e, rp = m.rp, name = m.name }
         end
@@ -931,10 +1102,11 @@ StaticPopupDialogs["PROCHUNTER_DEPALL"] = {
 }
 
 StaticPopupDialogs["PROCHUNTER_EXTRACTALL"] = {
-    text = "Extract ALL missing procs?\n\nThis withdraws and DESTROYS " ..
-        "one vault copy per proc learned, item after item, until " ..
-        "everything extractable is unlocked. Teleport procs are " ..
-        "skipped (server rule).",
+    text = "Extract ALL missing effects?\n\nOne vault copy is " ..
+        "DESTROYED per effect learned, item after item, until " ..
+        "everything extractable is unlocked. Vault stock is used " ..
+        "first — a bag copy is only consumed when the vault has " ..
+        "none. Teleport/portal effects are skipped (server rule).",
     button1 = "Run it",
     button2 = "Cancel",
     OnAccept = StartRunAll,
@@ -999,7 +1171,7 @@ local function ExtractTick(now)
             AbortExtract("the withdrawn copy never reached your bags")
         end
     elseif w.stage == "locate" then
-        if now - w.at > 6 then
+        if now - w.at > PaceTimeout() then
             local hit, why = ResolveExRows(w)
             if hit then
                 -- rows arrived but the END line never did — use them
@@ -1009,11 +1181,13 @@ local function ExtractTick(now)
             elseif why == "dupes" then
                 AbortExtract("several copies of this item are in your bags — keep exactly ONE, then retry")
             else
+                PaceFail()
                 AbortExtract("no answer from the extraction picker")
             end
         end
     elseif w.stage == "unlock" then
-        if now - w.at > 6 then
+        if now - w.at > PaceTimeout() then
+            PaceFail()
             AbortExtract("unlock not confirmed — check the Wardrobe before retrying")
         end
     end
@@ -1160,11 +1334,20 @@ end
 --========================= wire handler ==============================
 local comms = CreateFrame("Frame")
 comms:RegisterEvent("CHAT_MSG_ADDON")
-comms:SetScript("OnEvent", function(_, _, prefix, msg)
+comms:RegisterEvent("BAG_UPDATE")
+comms:SetScript("OnEvent", function(_, event, prefix, msg)
+    if event == "BAG_UPDATE" then
+        bagDirty = GetTime()
+        return
+    end
     if wireDebug and msg then
         Msg("|cff888888[wire]|r " .. tostring(prefix) .. " " .. strsub(msg, 1, 70))
     end
     if prefix ~= RECV_PREFIX or not msg then return end
+    if exFlow and flowWire and #flowWire < 40
+        and not find(msg, "^VLTROW") then
+        flowWire[#flowWire + 1] = strsub(msg, 1, 90)
+    end
     if find(msg, "^VLTROW:") then
         local got = false
         for e, rp, c, q, cl, sub, il in gmatch(msg,
@@ -1246,15 +1429,20 @@ comms:SetScript("OnEvent", function(_, _, prefix, msg)
                 exDoneAt = GetTime()
                 exDoneName = GetSpellInfo(sp) or ("#" .. sp)
                 exFlow = nil
+                PaceOk()
+                flowWire = nil
                 if runAll then
                     runAll.learned = runAll.learned + 1
-                    runAll.wait = GetTime() + 2.5 -- server throttle pacing
+                    runAll.wait = GetTime() + PaceGap()
                 end
             end
             Rebuild() -- Dashboard unlocks absorbed too: ticks stay live
         end
+    elseif find(msg, "^DSAERR") then
+        PaceFail() -- the server told us to slow down
     elseif find(msg, "^ICERR:") then
         if exFlow then
+            PaceFail()
             AbortExtract("server refused: " ..
                 (match(msg, "^ICERR:[^:]*:(.*)$") or msg))
         end
@@ -1294,6 +1482,10 @@ ticker:SetScript("OnUpdate", function()
         and now - pollAt >= POLL_INTERVAL then
         pollAt = now
         TryVaultGlobal()
+    end
+    if bagDirty and now - bagDirty >= 0.3 then
+        bagDirty = nil
+        Rebuild()
     end
     CheckWithdraw(now)
     ExtractTick(now)
@@ -1418,6 +1610,13 @@ local function BuildUI()
         RequestCollection()
     end)
 
+    local logBtn = CreateFrame("Button", nil, ui, "UIPanelButtonTemplate")
+    logBtn:SetWidth(44); logBtn:SetHeight(20)
+    logBtn:SetPoint("TOPRIGHT", ui, "TOPRIGHT", -30, -6)
+    logBtn:SetText("Log")
+    logBtn:SetScript("OnClick", function() ToggleLogFrame() end)
+    ui.logBtn = logBtn
+
     local exAll = CreateFrame("Button", nil, ui, "UIPanelButtonTemplate")
     exAll:SetWidth(90); exAll:SetHeight(20)
     exAll:SetPoint("LEFT", refresh, "RIGHT", 6, 0)
@@ -1524,9 +1723,19 @@ local function BuildUI()
                         StartExtract(self.data)
                     end
                 elseif IsShiftKeyDown() then
-                    ShowAmountDialog(self.data)
+                    if (self.data.count or 0) > 0 then
+                        ShowAmountDialog(self.data)
+                    else
+                        Msg("no vault stock of " .. (self.data.name or "?")
+                            .. " — those copies are in your bags")
+                    end
                 else
-                    StartWithdraw(self.data, 1) -- one, always
+                    if (self.data.count or 0) > 0 then
+                        StartWithdraw(self.data, 1) -- one, always
+                    else
+                        Msg("no vault stock of " .. (self.data.name or "?")
+                            .. " — those copies are in your bags")
+                    end
                 end
             end
         end)
@@ -1644,6 +1853,10 @@ RefreshList = function()
             r.ilvl:SetText(m.ilvl and ("|cff888888" .. m.ilvl .. "|r") or "")
             local cnt = (m.count and m.count > 1)
                 and (" |cff888888x" .. m.count .. "|r") or ""
+            if (m.bagCount or 0) > 0 then
+                cnt = cnt .. " |cff88bbff(+" .. m.bagCount
+                    .. " in bags)|r"
+            end
             r.name:SetText(QualityHex(m.q) .. (m.name or "?") .. "|r" .. cnt)
             if m.extT and m.extT > 0 and m.extN >= m.extT then
                 r.tick:SetVertexColor(1, 1, 1)       -- green tick: all unlocked
@@ -1713,6 +1926,75 @@ RefreshList = function()
 end
 
 --==================== extract consent dialog =========================
+local logFrame
+ToggleLogFrame = function()
+    if logFrame and logFrame:IsShown() then logFrame:Hide() return end
+    if not logFrame then
+        logFrame = CreateFrame("Frame", "ProcHunterLogFrame", UIParent)
+        logFrame:SetWidth(560); logFrame:SetHeight(420)
+        logFrame:SetPoint("CENTER", 40, 0)
+        logFrame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 12, insets = { left=3, right=3, top=3, bottom=3 } })
+        logFrame:SetBackdropColor(0.07, 0.07, 0.09, 1)
+        logFrame:SetMovable(true); logFrame:EnableMouse(true)
+        logFrame:RegisterForDrag("LeftButton")
+        logFrame:SetScript("OnDragStart", function(f) f:StartMoving() end)
+        logFrame:SetScript("OnDragStop", function(f) f:StopMovingOrSizing() end)
+        logFrame:SetFrameStrata("DIALOG")
+        local t = logFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        t:SetPoint("TOP", 0, -10)
+        t:SetText("ProcHunter — failed extractions (select text, Ctrl+C)")
+        local close = CreateFrame("Button", nil, logFrame,
+            "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", -2, -2)
+        local clear = CreateFrame("Button", nil, logFrame,
+            "UIPanelButtonTemplate")
+        clear:SetWidth(60); clear:SetHeight(20)
+        clear:SetPoint("BOTTOMRIGHT", -12, 10)
+        clear:SetText("Clear")
+        clear:SetScript("OnClick", function()
+            if db then db.failLog = {} end
+            logFrame:Hide()
+        end)
+        local sc = CreateFrame("ScrollFrame", "ProcHunterLogScroll",
+            logFrame, "UIPanelScrollFrameTemplate")
+        sc:SetPoint("TOPLEFT", 12, -30)
+        sc:SetPoint("BOTTOMRIGHT", -32, 36)
+        local eb = CreateFrame("EditBox", "ProcHunterLogEdit", sc)
+        eb:SetMultiLine(true)
+        eb:SetFontObject(ChatFontNormal)
+        eb:SetWidth(500)
+        eb:SetAutoFocus(false)
+        eb:SetScript("OnEscapePressed", function(f) f:ClearFocus() end)
+        eb:SetScript("OnEditFocusGained", function(f) f:HighlightText() end)
+        -- read-only: any typing is reverted to the log text
+        eb:SetScript("OnTextChanged", function(f, user)
+            if user then f:SetText(f.logText or "") end
+        end)
+        sc:SetScrollChild(eb)
+        logFrame.edit = eb
+    end
+    local log = (db and db.failLog) or {}
+    local out = {}
+    for i = 1, #log do
+        local en = log[i]
+        out[#out + 1] = format("[%s] %s%s — %s", en.t or "?",
+            en.name or "?", en.e and (" (" .. en.e .. ")") or "",
+            en.reason or "?")
+        if en.wire then
+            for j = 1, #en.wire do
+                out[#out + 1] = "    | " .. en.wire[j]
+            end
+        end
+    end
+    if #out == 0 then out[1] = "(no failed extractions logged)" end
+    local text = table.concat(out, "\n")
+    logFrame.edit.logText = text
+    logFrame.edit:SetText(text)
+    logFrame:Show()
+end
+
 ShowExtractDialog = function()
     local w = exFlow
     if not w then return end
